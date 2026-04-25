@@ -9,7 +9,7 @@
 		"dev": "pnpm -r --parallel dev",
 		"build": "pnpm -r build",
 		"lint": "biome check .",
-		"format": "biome format --write .",
+		"format": "biome check --write .",
 		"test": "vitest run --passWithNoTests",
 		"prepare": "husky"
 	},
