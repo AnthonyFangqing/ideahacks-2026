@@ -19,6 +19,7 @@ from werkzeug.utils import secure_filename
 
 from calibre_library import (
     CalibreLibraryError,
+    delete_library_books,
     export_library_book,
     import_file_to_library,
     library_book_cover_path,
@@ -27,7 +28,6 @@ from calibre_library import (
 )
 from calibre_utils import (
     CalibreHelperError,
-    delete_book_from_device,
     get_attached_device,
     get_device_book_cover,
     import_book_from_device,
@@ -513,25 +513,6 @@ def request_int_list(payload: dict[str, Any], plural_key: str, singular_key: str
     return [int(item) for item in raw_items]
 
 
-def request_string_list(
-    payload: dict[str, Any],
-    plural_key: str,
-    singular_key: str,
-) -> list[str]:
-    raw_items = payload.get(plural_key)
-    if raw_items is None and singular_key in payload:
-        raw_items = [payload[singular_key]]
-    if not isinstance(raw_items, list) or not raw_items:
-        raise ValueError(f"{plural_key} is required")
-
-    items: list[str] = []
-    for item in raw_items:
-        if not isinstance(item, str) or not item:
-            raise ValueError(f"{plural_key} must contain non-empty strings")
-        items.append(item)
-    return items
-
-
 def request_device_imports(payload: dict[str, Any]) -> list[dict[str, Any]]:
     raw_items = payload.get("books")
     if raw_items is None and "device_path" in payload:
@@ -599,6 +580,35 @@ def api_import_to_library():
     })
 
 
+@app.post("/api/library/delete")
+def api_delete_from_library():
+    payload = request.get_json(silent=True) or {}
+    try:
+        book_ids = request_int_list(payload, "book_ids", "book_id")
+    except (TypeError, ValueError) as exc:
+        return api_error(str(exc), 400)
+
+    def work(job: TransferJob) -> dict[str, Any]:
+        total = len(book_ids)
+        update_transfer_job(
+            job,
+            stage=f"Deleting {total} book{'s' if total != 1 else ''} from library",
+            progress=0.25,
+        )
+        delete_library_books(book_ids)
+        update_transfer_job(job, stage="Refreshing library", progress=0.8)
+        books = decorate_library_books(list_library_books())
+        return {
+            "ok": True,
+            "deleted_ids": book_ids,
+            "library": library_status(),
+            "books": books,
+        }
+
+    job = start_transfer_job("delete_from_library", work)
+    return jsonify({"ok": True, "job": serialize_transfer_job(job)}), 202
+
+
 @app.post("/api/device/send")
 def api_send_to_device():
     payload = request.get_json(silent=True) or {}
@@ -660,13 +670,13 @@ def api_import_from_device():
         imports = request_device_imports(payload)
     except ValueError as exc:
         return api_error(str(exc), 400)
-    delete_after_import = bool(payload.get("delete_after_import", False))
+    if payload.get("delete_after_import"):
+        return api_error("Moving books off the reader is no longer supported", 400)
 
     def work(job: TransferJob) -> dict[str, Any]:
         started_at = time.perf_counter()
         temp_paths: list[Path] = []
         added_ids: list[int] = []
-        deleted: list[dict[str, Any]] = []
         try:
             app.logger.info("device.import waiting for device_operation_lock")
             update_transfer_job(job, stage="Waiting for reader", progress=0.1)
@@ -704,20 +714,9 @@ def api_import_from_device():
                         imported.get("metadata") or item["metadata"],
                         delete_after_import=True,
                     ))
-                    if delete_after_import:
-                        update_transfer_job(
-                            job,
-                            stage=f"Deleting {index}/{total} from reader",
-                            progress=0.7 + ((index - 1) / total) * 0.15,
-                        )
-                        deleted.append(delete_book_from_device(device_path))
                 update_transfer_job(job, stage="Refreshing library", progress=0.85)
                 books = decorate_library_books(list_library_books())
-            reader = (
-                refresh_connected_e_reader()
-                if delete_after_import
-                else current_connected_e_reader()
-            )
+            reader = current_connected_e_reader()
         except Exception:
             for temp_path in temp_paths:
                 temp_path.unlink(missing_ok=True)
@@ -726,45 +725,12 @@ def api_import_from_device():
         return {
             "ok": True,
             "added_ids": added_ids,
-            "deleted": deleted,
             "connected_e_reader": asdict(reader) if reader is not None else None,
             "books": books,
             "elapsed_seconds": round(time.perf_counter() - started_at, 2),
         }
 
     job = start_transfer_job("import_from_device", work)
-    return jsonify({"ok": True, "job": serialize_transfer_job(job)}), 202
-
-
-@app.post("/api/device/delete")
-def api_delete_from_device():
-    payload = request.get_json(silent=True) or {}
-    try:
-        device_paths = request_string_list(payload, "device_paths", "device_path")
-    except ValueError as exc:
-        return api_error(str(exc), 400)
-
-    def work(job: TransferJob) -> dict[str, Any]:
-        deleted: list[dict[str, Any]] = []
-        update_transfer_job(job, stage="Waiting for reader", progress=0.1)
-        with device_operation_lock:
-            total = len(device_paths)
-            for index, device_path in enumerate(device_paths, start=1):
-                update_transfer_job(
-                    job,
-                    stage=f"Deleting {index}/{total} from reader",
-                    progress=0.2 + ((index - 1) / total) * 0.6,
-                )
-                deleted.append(delete_book_from_device(device_path))
-        update_transfer_job(job, stage="Refreshing reader", progress=0.85)
-        reader = refresh_connected_e_reader()
-        return {
-            "ok": True,
-            "deleted": deleted,
-            "connected_e_reader": asdict(reader) if reader is not None else None,
-        }
-
-    job = start_transfer_job("delete_from_device", work)
     return jsonify({"ok": True, "job": serialize_transfer_job(job)}), 202
 
 

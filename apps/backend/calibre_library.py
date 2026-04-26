@@ -218,6 +218,20 @@ def import_file_to_library(
     return parse_added_ids(result.stdout)
 
 
+def delete_library_books(book_ids: list[int]) -> None:
+    if not book_ids:
+        raise CalibreLibraryError("At least one book id is required")
+
+    command = [
+        CALIBREDB_EXECUTABLE,
+        "remove",
+        "--library-path",
+        str(configured_library_path()),
+        ",".join(str(book_id) for book_id in book_ids),
+    ]
+    _run_command(command)
+
+
 def get_library_book(book_id: int) -> dict[str, Any]:
     for book in list_library_books(f"id:{book_id}"):
         if book.get("id") == book_id:

@@ -507,10 +507,7 @@ function App() {
 		});
 	};
 
-	const importFromReader = (
-		selectedBooks: Book[],
-		deleteAfterImport: boolean,
-	) => {
+	const importFromReader = (selectedBooks: Book[]) => {
 		const booksForImport = selectedBooks
 			.map((book, index) => ({
 				book,
@@ -534,7 +531,7 @@ function App() {
 			return;
 		}
 
-		const busyKey = `import-${booksForImport.map((item) => item.key).join("-")}-${deleteAfterImport}`;
+		const busyKey = `import-${booksForImport.map((item) => item.key).join("-")}`;
 		void runTransfer(busyKey, async () => {
 			const response = await postJson<
 				JobStartResponse<{ books?: LibraryBook[] } & DeviceResponse>
@@ -543,7 +540,6 @@ function App() {
 					device_path: item.devicePath,
 					metadata: item.book,
 				})),
-				delete_after_import: deleteAfterImport,
 			});
 			const result = await waitForJob(busyKey, response.job);
 			setReader(result.connected_e_reader);
@@ -553,27 +549,14 @@ function App() {
 				await loadLibrary();
 			}
 			setSelectedDeviceBookKeys(new Set());
-			return deleteAfterImport
-				? `Moved ${booksForImport.length} book${
-						booksForImport.length === 1 ? "" : "s"
-					} into the kiosk library.`
-				: `Copied ${booksForImport.length} book${
-						booksForImport.length === 1 ? "" : "s"
-					} into the kiosk library.`;
+			return `Copied ${booksForImport.length} book${
+				booksForImport.length === 1 ? "" : "s"
+			} into the kiosk library.`;
 		});
 	};
 
-	const deleteFromReader = (selectedBooks: Book[]) => {
-		const booksForDelete = selectedBooks
-			.map((book, index) => ({
-				book,
-				key: getBookKey(book, index),
-				devicePath: getDevicePath(book),
-			}))
-			.filter((item): item is { book: Book; key: string; devicePath: string } =>
-				Boolean(item.devicePath),
-			);
-		if (booksForDelete.length === 0) {
+	const deleteFromLibrary = (selectedBooks: LibraryBook[]) => {
+		if (selectedBooks.length === 0) {
 			setTransferState({
 				busyKey: null,
 				jobId: null,
@@ -581,26 +564,25 @@ function App() {
 				progress: null,
 				displayProgress: null,
 				message: null,
-				error: "Choose at least one device book with a Calibre path first.",
+				error: "Choose at least one library book first.",
 				lastKey: null,
 			});
 			return;
 		}
 
-		const busyKey = `delete-${booksForDelete.map((item) => item.key).join("-")}`;
+		const busyKey = `library-delete-${selectedBooks.map((book) => book.id).join("-")}`;
 		void runTransfer(busyKey, async () => {
-			const response = await postJson<JobStartResponse<DeviceResponse>>(
-				`${apiBaseUrl}/api/device/delete`,
-				{
-					device_paths: booksForDelete.map((item) => item.devicePath),
-				},
+			const response = await postJson<JobStartResponse<LibraryResponse>>(
+				`${apiBaseUrl}/api/library/delete`,
+				{ book_ids: selectedBooks.map((book) => book.id) },
 			);
 			const result = await waitForJob(busyKey, response.job);
-			setReader(result.connected_e_reader);
-			setSelectedDeviceBookKeys(new Set());
-			return `Deleted ${booksForDelete.length} book${
-				booksForDelete.length === 1 ? "" : "s"
-			} from the reader.`;
+			setLibrary(result.library);
+			setLibraryBooks(result.books);
+			setSelectedLibraryBookIds(new Set());
+			return `Deleted ${selectedBooks.length} book${
+				selectedBooks.length === 1 ? "" : "s"
+			} from the kiosk library.`;
 		});
 	};
 
@@ -702,8 +684,8 @@ function App() {
 					<p className="eyebrow">IdeaHacks Bookshelf</p>
 					<h1>Calibre-powered book dock</h1>
 					<p className="lede">
-						Move books between a kiosk Calibre library and a docked e-reader
-						using the same Calibre device layer the backend already trusts.
+						Copy books between a kiosk Calibre library and a docked e-reader,
+						then manage the kiosk library with Calibre-backed actions.
 					</p>
 				</div>
 
@@ -861,24 +843,9 @@ function App() {
 								<button
 									type="button"
 									disabled={transferState.busyKey !== null}
-									onClick={() => importFromReader(selectedDeviceBooks, false)}
+									onClick={() => importFromReader(selectedDeviceBooks)}
 								>
 									Copy selected
-								</button>
-								<button
-									type="button"
-									disabled={transferState.busyKey !== null}
-									onClick={() => importFromReader(selectedDeviceBooks, true)}
-								>
-									Move selected
-								</button>
-								<button
-									type="button"
-									className="danger"
-									disabled={transferState.busyKey !== null}
-									onClick={() => deleteFromReader(selectedDeviceBooks)}
-								>
-									Delete selected
 								</button>
 							</div>
 						) : null}
@@ -895,10 +862,7 @@ function App() {
 									apiBaseUrl={apiBaseUrl}
 									transferState={transferState}
 									onToggle={() => toggleDeviceBook(book, index)}
-									onImport={(bookToImport, deleteAfterImport) =>
-										importFromReader([bookToImport], deleteAfterImport)
-									}
-									onDelete={(bookToDelete) => deleteFromReader([bookToDelete])}
+									onImport={(bookToImport) => importFromReader([bookToImport])}
 								/>
 							))}
 						</ul>
@@ -929,6 +893,14 @@ function App() {
 								>
 									Send selected
 								</button>
+								<button
+									type="button"
+									className="danger"
+									disabled={transferState.busyKey !== null}
+									onClick={() => deleteFromLibrary(selectedLibraryBooks)}
+								>
+									Delete selected
+								</button>
 							</div>
 						) : null}
 					</div>
@@ -941,7 +913,8 @@ function App() {
 									className={`book-card library-book ${
 										selectedLibraryBookIds.has(book.id) ? "selected" : ""
 									} ${
-										transferState.lastKey === `send-${book.id}`
+										transferState.lastKey === `send-${book.id}` ||
+										transferState.lastKey === `library-delete-${book.id}`
 											? "complete"
 											: ""
 									}`}
@@ -980,6 +953,16 @@ function App() {
 												? "Sending..."
 												: "Send to reader"}
 										</button>
+										<button
+											type="button"
+											className="danger"
+											disabled={transferState.busyKey !== null}
+											onClick={() => deleteFromLibrary([book])}
+										>
+											{transferState.busyKey === `library-delete-${book.id}`
+												? "Deleting..."
+												: "Delete"}
+										</button>
 									</div>
 									{transferState.lastKey === `send-${book.id}` ? (
 										<p className="inline-status">Sent to reader.</p>
@@ -1007,7 +990,6 @@ function DeviceBookCard({
 	transferState,
 	onToggle,
 	onImport,
-	onDelete,
 }: {
 	book: Book;
 	index: number;
@@ -1015,17 +997,11 @@ function DeviceBookCard({
 	apiBaseUrl: string;
 	transferState: TransferState;
 	onToggle: () => void;
-	onImport: (book: Book, deleteAfterImport: boolean) => void;
-	onDelete: (book: Book) => void;
+	onImport: (book: Book) => void;
 }) {
 	const devicePath = getDevicePath(book) ?? getBookKey(book, index);
-	const copyKey = `import-${devicePath}-false`;
-	const moveKey = `import-${devicePath}-true`;
-	const deleteKey = `delete-${devicePath}`;
-	const completed =
-		transferState.lastKey === copyKey ||
-		transferState.lastKey === moveKey ||
-		transferState.lastKey === deleteKey;
+	const copyKey = `import-${devicePath}`;
+	const completed = transferState.lastKey === copyKey;
 
 	return (
 		<li
@@ -1042,24 +1018,9 @@ function DeviceBookCard({
 				<button
 					type="button"
 					disabled={transferState.busyKey !== null}
-					onClick={() => onImport(book, false)}
+					onClick={() => onImport(book)}
 				>
 					{transferState.busyKey === copyKey ? "Copying..." : "Copy to kiosk"}
-				</button>
-				<button
-					type="button"
-					disabled={transferState.busyKey !== null}
-					onClick={() => onImport(book, true)}
-				>
-					{transferState.busyKey === moveKey ? "Moving..." : "Move to kiosk"}
-				</button>
-				<button
-					type="button"
-					className="danger"
-					disabled={transferState.busyKey !== null}
-					onClick={() => onDelete(book)}
-				>
-					{transferState.busyKey === deleteKey ? "Deleting..." : "Delete"}
 				</button>
 			</div>
 			{completed ? <p className="inline-status">Library updated.</p> : null}
