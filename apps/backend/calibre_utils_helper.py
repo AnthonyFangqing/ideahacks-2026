@@ -18,16 +18,16 @@ HELPER_JSON_PREFIX = "__BOOKSHELF_JSON__="
 def main() -> int:
     try:
         with contextlib.redirect_stdout(sys.stderr):
-            books = list_main_memory_books()
+            device = get_connected_device()
     except Exception as exc:
         emit({"ok": False, "error": str(exc), "traceback": traceback.format_exc()})
         return 1
 
-    emit({"ok": True, "books": books})
+    emit({"ok": True, "device": device})
     return 0
 
 
-def list_main_memory_books() -> list[dict[str, Any]]:
+def get_connected_device() -> dict[str, Any] | None:
     try:
         scanner = DeviceScanner()
         scanner.scan()
@@ -56,12 +56,16 @@ def list_main_memory_books() -> list[dict[str, Any]]:
                 connected_devices.append((detected, selected_device))
 
         if selected_device is None:
-            return []
+            return None
 
         opened_device = open_first_available_device(connected_devices, device_prefs)
         if opened_device is None:
-            return []
-        return [book_to_dict(book) for book in opened_device.books()]
+            return None
+
+        return {
+            "name": get_device_name(opened_device),
+            "books": [book_to_dict(book) for book in opened_device.books()],
+        }
     finally:
         shutdown_plugins(device_plugins)
 
@@ -77,6 +81,17 @@ def open_first_available_device(connected_devices, device_prefs):
         return plugin
 
     return None
+
+
+def get_device_name(device) -> str:
+    try:
+        name = device.get_device_information()[0]
+    except Exception:
+        name = None
+
+    if name:
+        return str(name)
+    return str(getattr(device, "name", None) or device.__class__.__name__)
 
 
 def shutdown_plugins(device_plugins) -> None:

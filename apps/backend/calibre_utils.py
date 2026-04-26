@@ -15,9 +15,36 @@ class CalibreHelperError(RuntimeError):
     """Raised if the Calibre helper script fails."""
 
 
+def get_attached_device() -> dict[str, Any] | None:
+    """Return the attached e-reader metadata, or None if no reader is attached."""
+
+    decoded = _run_helper()
+    device = decoded.get("device")
+    if device is None:
+        return None
+    if not isinstance(device, dict):
+        raise CalibreHelperError("Calibre helper returned an invalid device")
+
+    name = device.get("name")
+    books = device.get("books")
+    if not isinstance(name, str):
+        raise CalibreHelperError("Calibre helper returned an invalid device name")
+    if not isinstance(books, list) or not all(isinstance(book, dict) for book in books):
+        raise CalibreHelperError("Calibre helper returned an invalid book list")
+
+    return {"name": name, "books": books}
+
+
 def get_attached_device_books() -> list[dict[str, Any]]:
     """Return books in the attached e-reader's main memory."""
 
+    device = get_attached_device()
+    if device is None:
+        return []
+    return device["books"]
+
+
+def _run_helper() -> dict[str, Any]:
     try:
         with tempfile.NamedTemporaryFile(
             prefix="bookshelf_calibre_utils_helper"
@@ -60,8 +87,4 @@ def get_attached_device_books() -> list[dict[str, Any]]:
         error = decoded.get("error") or "Calibre helper failed"
         raise CalibreHelperError(str(error))
 
-    books = decoded.get("books")
-    if not isinstance(books, list) or not all(isinstance(book, dict) for book in books):
-        raise CalibreHelperError("Calibre helper returned an invalid book list")
-
-    return books
+    return decoded
