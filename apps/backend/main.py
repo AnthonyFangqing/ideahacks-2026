@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import atexit
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 import json
 import logging
 from pathlib import Path
-import shutil
 import tempfile
 import threading
 import time
 from typing import Any
+import uuid
 
 from flask import Flask, jsonify, request, send_from_directory
 from flask_sock import Sock
@@ -42,6 +42,21 @@ class ConnectedEReader:
     books: list[dict[str, Any]]
 
 
+@dataclass
+class TransferJob:
+    id: str
+    kind: str
+    status: str = "queued"
+    stage: str = "Queued"
+    progress: float = 0.0
+    message: str | None = None
+    error: str | None = None
+    result: dict[str, Any] | None = None
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+    finished_at: float | None = None
+
+
 connected_e_reader: ConnectedEReader | None = None
 connected_e_reader_lock = threading.Lock()
 stream_clients = set()
@@ -50,6 +65,8 @@ libusb_stop_event = threading.Event()
 libusb_context: usb1.USBContext | None = None
 libusb_thread: threading.Thread | None = None
 device_operation_lock = threading.Lock()
+transfer_jobs: dict[str, TransferJob] = {}
+transfer_jobs_lock = threading.Lock()
 
 
 app = Flask(__name__, static_folder=None)
@@ -216,6 +233,73 @@ def start_background_services() -> None:
     start_libusb_event_loop()
 
 
+def serialize_transfer_job(job: TransferJob) -> dict[str, Any]:
+    return asdict(job)
+
+
+def update_transfer_job(job: TransferJob, **updates: Any) -> None:
+    with transfer_jobs_lock:
+        for key, value in updates.items():
+            setattr(job, key, value)
+        job.updated_at = time.time()
+
+
+def start_transfer_job(kind: str, work) -> TransferJob:
+    job = TransferJob(id=uuid.uuid4().hex, kind=kind)
+    with transfer_jobs_lock:
+        transfer_jobs[job.id] = job
+
+    def run() -> None:
+        started_at = time.perf_counter()
+        update_transfer_job(job, status="running", stage="Starting", progress=0.05)
+        try:
+            result = work(job)
+        except (CalibreLibraryError, CalibreHelperError) as exc:
+            update_transfer_job(
+                job,
+                status="failed",
+                stage="Failed",
+                progress=1.0,
+                error=str(exc),
+                finished_at=time.time(),
+            )
+            app.logger.warning("transfer job %s failed: %s", job.id, exc)
+            return
+        except Exception:
+            app.logger.exception("transfer job %s crashed", job.id)
+            update_transfer_job(
+                job,
+                status="failed",
+                stage="Failed",
+                progress=1.0,
+                error="Transfer job crashed",
+                finished_at=time.time(),
+            )
+            return
+
+        update_transfer_job(
+            job,
+            status="completed",
+            stage="Done",
+            progress=1.0,
+            result=result,
+            message=f"{kind} completed in {time.perf_counter() - started_at:.2f}s",
+            finished_at=time.time(),
+        )
+
+    threading.Thread(target=run, name=f"transfer-job-{job.id}", daemon=True).start()
+    return job
+
+
+@app.get("/api/jobs/<job_id>")
+def api_transfer_job(job_id: str):
+    with transfer_jobs_lock:
+        job = transfer_jobs.get(job_id)
+        if job is None:
+            return api_error("job was not found", 404)
+        return jsonify({"job": serialize_transfer_job(job)})
+
+
 @app.get("/api/library")
 def api_library():
     query = request.args.get("query") or None
@@ -285,27 +369,33 @@ def api_send_to_device():
     if requested_format is not None and not isinstance(requested_format, str):
         return api_error("format must be a string", 400)
 
-    exported: dict[str, Any] | None = None
-    try:
-        with device_operation_lock:
-            exported = export_library_book(book_id, requested_format)
-            transfer = send_book_to_device(
-                exported["path"],
-                exported["filename"],
-                exported["book"],
-            )
-        reader = refresh_connected_e_reader()
-    except (CalibreLibraryError, CalibreHelperError) as exc:
-        return api_error(str(exc), 500)
-    finally:
-        if exported is not None:
-            Path(exported["path"]).unlink(missing_ok=True)
+    def work(job: TransferJob) -> dict[str, Any]:
+        exported: dict[str, Any] | None = None
+        try:
+            update_transfer_job(job, stage="Waiting for reader", progress=0.1)
+            with device_operation_lock:
+                update_transfer_job(job, stage="Exporting from library", progress=0.25)
+                exported = export_library_book(book_id, requested_format)
+                update_transfer_job(job, stage="Sending to reader", progress=0.55)
+                transfer = send_book_to_device(
+                    exported["path"],
+                    exported["filename"],
+                    exported["book"],
+                )
+            update_transfer_job(job, stage="Refreshing reader", progress=0.85)
+            reader = refresh_connected_e_reader()
+        finally:
+            if exported is not None:
+                Path(exported["path"]).unlink(missing_ok=True)
 
-    return jsonify({
-        "ok": True,
-        "transfer": transfer,
-        "connected_e_reader": asdict(reader) if reader is not None else None,
-    })
+        return {
+            "ok": True,
+            "transfer": transfer,
+            "connected_e_reader": asdict(reader) if reader is not None else None,
+        }
+
+    job = start_transfer_job("send_to_device", work)
+    return jsonify({"ok": True, "job": serialize_transfer_job(job)}), 202
 
 
 @app.post("/api/device/import")
@@ -325,56 +415,58 @@ def api_import_from_device():
     )
     temp_file.close()
 
-    started_at = time.perf_counter()
-    try:
-        app.logger.info("device.import waiting for device_operation_lock")
-        with device_operation_lock:
-            app.logger.info(
-                "device.import acquired device_operation_lock after %.2fs",
-                time.perf_counter() - started_at,
-            )
-            if Path(device_path).is_file():
-                app.logger.info("device.import copying mounted file: %s", device_path)
-                shutil.copyfile(device_path, temp_file.name)
-                imported = {"path": temp_file.name, "metadata": payload.get("metadata") or {}}
-            else:
-                app.logger.info("device.import copying via Calibre helper: %s", device_path)
+    def work(job: TransferJob) -> dict[str, Any]:
+        started_at = time.perf_counter()
+        try:
+            app.logger.info("device.import waiting for device_operation_lock")
+            update_transfer_job(job, stage="Waiting for reader", progress=0.1)
+            with device_operation_lock:
+                app.logger.info(
+                    "device.import acquired device_operation_lock after %.2fs",
+                    time.perf_counter() - started_at,
+                )
+                update_transfer_job(job, stage="Copying from reader", progress=0.3)
                 imported = import_book_from_device(device_path, temp_file.name)
-            app.logger.info(
-                "device.import copied file in %.2fs",
-                time.perf_counter() - started_at,
-            )
-            added_ids = import_file_to_library(
-                temp_file.name,
-                imported.get("metadata"),
-                delete_after_import=True,
-            )
-            app.logger.info(
-                "device.import added to library in %.2fs",
-                time.perf_counter() - started_at,
-            )
-            deleted = None
-            if delete_after_import:
-                if Path(device_path).is_file():
-                    app.logger.info("device.import deleting mounted file: %s", device_path)
-                    Path(device_path).unlink()
-                    deleted = {"path": device_path}
-                else:
+                app.logger.info(
+                    "device.import copied file in %.2fs",
+                    time.perf_counter() - started_at,
+                )
+                update_transfer_job(job, stage="Adding to library", progress=0.6)
+                added_ids = import_file_to_library(
+                    temp_file.name,
+                    imported.get("metadata") or payload.get("metadata"),
+                    delete_after_import=True,
+                )
+                app.logger.info(
+                    "device.import added to library in %.2fs",
+                    time.perf_counter() - started_at,
+                )
+                deleted = None
+                if delete_after_import:
+                    update_transfer_job(job, stage="Deleting from reader", progress=0.75)
                     deleted = delete_book_from_device(device_path)
-            books = list_library_books()
-        reader = refresh_connected_e_reader() if delete_after_import else current_connected_e_reader()
-    except (CalibreLibraryError, CalibreHelperError) as exc:
-        Path(temp_file.name).unlink(missing_ok=True)
-        return api_error(str(exc), 500)
+                update_transfer_job(job, stage="Refreshing library", progress=0.85)
+                books = list_library_books()
+            reader = (
+                refresh_connected_e_reader()
+                if delete_after_import
+                else current_connected_e_reader()
+            )
+        except Exception:
+            Path(temp_file.name).unlink(missing_ok=True)
+            raise
 
-    return jsonify({
-        "ok": True,
-        "added_ids": added_ids,
-        "deleted": deleted,
-        "connected_e_reader": asdict(reader) if reader is not None else None,
-        "books": books,
-        "elapsed_seconds": round(time.perf_counter() - started_at, 2),
-    })
+        return {
+            "ok": True,
+            "added_ids": added_ids,
+            "deleted": deleted,
+            "connected_e_reader": asdict(reader) if reader is not None else None,
+            "books": books,
+            "elapsed_seconds": round(time.perf_counter() - started_at, 2),
+        }
+
+    job = start_transfer_job("import_from_device", work)
+    return jsonify({"ok": True, "job": serialize_transfer_job(job)}), 202
 
 
 @app.post("/api/device/delete")
@@ -384,18 +476,21 @@ def api_delete_from_device():
     if not isinstance(device_path, str) or not device_path:
         return api_error("device_path is required", 400)
 
-    try:
+    def work(job: TransferJob) -> dict[str, Any]:
+        update_transfer_job(job, stage="Waiting for reader", progress=0.1)
         with device_operation_lock:
+            update_transfer_job(job, stage="Deleting from reader", progress=0.45)
             deleted = delete_book_from_device(device_path)
+        update_transfer_job(job, stage="Refreshing reader", progress=0.85)
         reader = refresh_connected_e_reader()
-    except CalibreHelperError as exc:
-        return api_error(str(exc), 500)
+        return {
+            "ok": True,
+            "deleted": deleted,
+            "connected_e_reader": asdict(reader) if reader is not None else None,
+        }
 
-    return jsonify({
-        "ok": True,
-        "deleted": deleted,
-        "connected_e_reader": asdict(reader) if reader is not None else None,
-    })
+    job = start_transfer_job("delete_from_device", work)
+    return jsonify({"ok": True, "job": serialize_transfer_job(job)}), 202
 
 
 def api_error(message: str, status_code: int):

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -256,9 +257,11 @@ def normalize_formats(formats: list[Any]) -> list[str]:
 
 def parse_added_ids(output: str) -> list[int]:
     ids: list[int] = []
-    for token in output.replace(",", " ").split():
-        if token.isdigit():
-            ids.append(int(token))
+    for line in output.splitlines():
+        match = re.match(r"^\s*added book ids?:\s*(.+)$", line, re.IGNORECASE)
+        if match is None:
+            continue
+        ids.extend(int(raw_id) for raw_id in re.findall(r"\d+", match.group(1)))
     return ids
 
 

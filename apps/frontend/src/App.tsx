@@ -45,9 +45,27 @@ type DeviceResponse = {
 	connected_e_reader: ConnectedEReader | null;
 };
 
+type TransferJob<T = Record<string, unknown>> = {
+	id: string;
+	kind: string;
+	status: "queued" | "running" | "completed" | "failed";
+	stage: string;
+	progress: number;
+	message: string | null;
+	error: string | null;
+	result: T | null;
+};
+
+type JobStartResponse<T> = {
+	job: TransferJob<T>;
+};
+
 type ConnectionState = "connecting" | "connected" | "disconnected" | "error";
 type TransferState = {
 	busyKey: string | null;
+	jobId: string | null;
+	stage: string | null;
+	progress: number | null;
 	message: string | null;
 	error: string | null;
 	lastKey: string | null;
@@ -158,6 +176,9 @@ function App() {
 	const [selectedLibraryFiles, setSelectedLibraryFiles] = useState<File[]>([]);
 	const [transferState, setTransferState] = useState<TransferState>({
 		busyKey: null,
+		jobId: null,
+		stage: null,
+		progress: null,
 		message: null,
 		error: null,
 		lastKey: null,
@@ -197,6 +218,9 @@ function App() {
 			.catch((error: unknown) => {
 				setTransferState({
 					busyKey: null,
+					jobId: null,
+					stage: null,
+					progress: null,
 					message: null,
 					error: error instanceof Error ? error.message : String(error),
 					lastKey: null,
@@ -233,15 +257,62 @@ function App() {
 		};
 	}, [streamUrl]);
 
+	const waitForJob = async <T,>(
+		busyKey: string,
+		startedJob: TransferJob<T>,
+	) => {
+		let job = startedJob;
+		while (job.status === "queued" || job.status === "running") {
+			setTransferState({
+				busyKey,
+				jobId: job.id,
+				stage: job.stage,
+				progress: job.progress,
+				message: null,
+				error: null,
+				lastKey: null,
+			});
+			await new Promise((resolve) => window.setTimeout(resolve, 700));
+			const response = await fetch(`${apiBaseUrl}/api/jobs/${job.id}`);
+			const decoded = (await response.json()) as {
+				job?: TransferJob<T>;
+				error?: string;
+			};
+			if (!response.ok || !decoded.job) {
+				throw new Error(decoded.error || "Failed to check transfer job");
+			}
+			job = decoded.job;
+		}
+
+		if (job.status === "failed") {
+			throw new Error(job.error || "Transfer failed");
+		}
+		if (!job.result) {
+			throw new Error("Transfer finished without a result");
+		}
+		return job.result;
+	};
+
 	const runTransfer = async (
 		busyKey: string,
 		action: () => Promise<string>,
 	) => {
-		setTransferState({ busyKey, message: null, error: null, lastKey: null });
+		setTransferState({
+			busyKey,
+			jobId: null,
+			stage: "Starting",
+			progress: 0,
+			message: null,
+			error: null,
+			lastKey: null,
+		});
 		try {
 			const message = await action();
 			setTransferState({
 				busyKey: null,
+				jobId: null,
+				stage: null,
+				progress: null,
 				message,
 				error: null,
 				lastKey: busyKey,
@@ -249,6 +320,9 @@ function App() {
 		} catch (error) {
 			setTransferState({
 				busyKey: null,
+				jobId: null,
+				stage: null,
+				progress: null,
 				message: null,
 				error: error instanceof Error ? error.message : String(error),
 				lastKey: busyKey,
@@ -258,11 +332,12 @@ function App() {
 
 	const sendToReader = (book: LibraryBook) =>
 		runTransfer(`send-${book.id}`, async () => {
-			const response = await postJson<DeviceResponse>(
+			const response = await postJson<JobStartResponse<DeviceResponse>>(
 				`${apiBaseUrl}/api/device/send`,
 				{ book_id: book.id },
 			);
-			setReader(response.connected_e_reader);
+			const result = await waitForJob(`send-${book.id}`, response.job);
+			setReader(result.connected_e_reader);
 			return `Sent "${book.title || "Untitled book"}" to the reader.`;
 		});
 
@@ -271,6 +346,9 @@ function App() {
 		if (!devicePath) {
 			setTransferState({
 				busyKey: null,
+				jobId: null,
+				stage: null,
+				progress: null,
 				message: null,
 				error: "This device book is missing a Calibre path.",
 				lastKey: null,
@@ -280,19 +358,22 @@ function App() {
 
 		void runTransfer(`import-${devicePath}-${deleteAfterImport}`, async () => {
 			const response = await postJson<
-				{ books?: LibraryBook[] } & DeviceResponse
+				JobStartResponse<{ books?: LibraryBook[] } & DeviceResponse>
 			>(`${apiBaseUrl}/api/device/import`, {
 				device_path: devicePath,
 				delete_after_import: deleteAfterImport,
 				metadata: book,
 			});
-			setReader(response.connected_e_reader);
-			if (response.books) {
-				setLibraryBooks(response.books);
+			const result = await waitForJob(
+				`import-${devicePath}-${deleteAfterImport}`,
+				response.job,
+			);
+			setReader(result.connected_e_reader);
+			if (result.books) {
+				setLibraryBooks(result.books);
 			} else {
 				await loadLibrary();
 			}
-			await loadLibrary();
 			return deleteAfterImport
 				? `Moved "${book.title || "Untitled book"}" into the kiosk library.`
 				: `Copied "${book.title || "Untitled book"}" into the kiosk library.`;
@@ -304,6 +385,9 @@ function App() {
 		if (!devicePath) {
 			setTransferState({
 				busyKey: null,
+				jobId: null,
+				stage: null,
+				progress: null,
 				message: null,
 				error: "This device book is missing a Calibre path.",
 				lastKey: null,
@@ -312,13 +396,14 @@ function App() {
 		}
 
 		void runTransfer(`delete-${devicePath}`, async () => {
-			const response = await postJson<DeviceResponse>(
+			const response = await postJson<JobStartResponse<DeviceResponse>>(
 				`${apiBaseUrl}/api/device/delete`,
 				{
 					device_path: devicePath,
 				},
 			);
-			setReader(response.connected_e_reader);
+			const result = await waitForJob(`delete-${devicePath}`, response.job);
+			setReader(result.connected_e_reader);
 			return `Deleted "${book.title || "Untitled book"}" from the reader.`;
 		});
 	};
@@ -327,6 +412,9 @@ function App() {
 		if (selectedLibraryFiles.length === 0) {
 			setTransferState({
 				busyKey: null,
+				jobId: null,
+				stage: null,
+				progress: null,
 				message: null,
 				error: "Choose at least one book file first.",
 				lastKey: null,
@@ -386,6 +474,15 @@ function App() {
 				</section>
 			) : null}
 
+			{transferState.busyKey && transferState.stage ? (
+				<section className="notice-panel">
+					{transferState.stage}
+					{typeof transferState.progress === "number"
+						? ` (${Math.round(transferState.progress * 100)}%)`
+						: ""}
+				</section>
+			) : null}
+
 			<section className="library-tools">
 				<div>
 					<p className="label">Kiosk Calibre library</p>
@@ -400,6 +497,9 @@ function App() {
 							void loadLibrary().catch((error: unknown) => {
 								setTransferState({
 									busyKey: null,
+									jobId: null,
+									stage: null,
+									progress: null,
 									message: null,
 									error: error instanceof Error ? error.message : String(error),
 									lastKey: null,
@@ -420,6 +520,9 @@ function App() {
 								void loadLibrary("").catch((error: unknown) => {
 									setTransferState({
 										busyKey: null,
+										jobId: null,
+										stage: null,
+										progress: null,
 										message: null,
 										error:
 											error instanceof Error ? error.message : String(error),
