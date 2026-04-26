@@ -49,10 +49,16 @@ class CalibreHelperError(RuntimeError):
 def get_attached_device() -> dict[str, Any] | None:
     """Return the attached e-reader metadata, or None if no reader is attached."""
 
-    decoded = _run_helper("scan")
+    try:
+        decoded = _run_helper("scan")
+    except CalibreHelperError:
+        fallback = get_mounted_device_from_calibre_cache()
+        if fallback is not None:
+            return fallback
+        raise
     device = decoded.get("device")
     if device is None:
-        return None
+        return get_mounted_device_from_calibre_cache()
     if not isinstance(device, dict):
         raise CalibreHelperError("Calibre helper returned an invalid device")
 
@@ -64,6 +70,60 @@ def get_attached_device() -> dict[str, Any] | None:
         raise CalibreHelperError("Calibre helper returned an invalid book list")
 
     return {"name": name, "books": books}
+
+
+def get_mounted_device_from_calibre_cache() -> dict[str, Any] | None:
+    """Return mounted device metadata from Calibre's on-device cache.
+
+    This lets the kiosk stay aware of a mounted reader when Calibre cannot scan
+    the live device database, for example after KoboReader.sqlite corruption.
+    """
+
+    for root in mounted_device_roots():
+        metadata_path = root / "metadata.calibre"
+        if not metadata_path.is_file():
+            continue
+        try:
+            raw_books = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(raw_books, list):
+            continue
+
+        books = []
+        for raw_book in raw_books:
+            if not isinstance(raw_book, dict):
+                continue
+            book = dict(raw_book)
+            lpath = book.get("lpath")
+            if isinstance(lpath, str) and lpath:
+                book["path"] = str(root / lpath)
+            books.append(book)
+
+        return {"name": mounted_device_name(root), "books": books}
+    return None
+
+
+def mounted_device_roots() -> list[Path]:
+    roots = []
+    volumes = Path("/Volumes")
+    if volumes.is_dir():
+        for candidate in volumes.iterdir():
+            if (candidate / "driveinfo.calibre").is_file():
+                roots.append(candidate)
+    return roots
+
+
+def mounted_device_name(root: Path) -> str:
+    driveinfo_path = root / "driveinfo.calibre"
+    try:
+        driveinfo = json.loads(driveinfo_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        driveinfo = {}
+    name = driveinfo.get("device_name") if isinstance(driveinfo, dict) else None
+    if isinstance(name, str) and name:
+        return name
+    return root.name
 
 
 def get_attached_device_books() -> list[dict[str, Any]]:

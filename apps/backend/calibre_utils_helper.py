@@ -139,16 +139,20 @@ def send_to_device(payload: dict[str, Any]) -> dict[str, Any]:
             raise RuntimeError("No e-reader is attached")
 
         mi = metadata_to_calibre_metadata(metadata)
-        locations = opened_device.upload_books(
-            [file_path],
-            [filename],
-            on_card=on_card,
-            end_session=False,
-            metadata=[mi],
-        )
-        booklists = get_device_booklists(opened_device)
-        opened_device.add_books_to_metadata(locations, [mi], booklists)
-        opened_device.sync_booklists(booklists, end_session=False)
+        booklists = get_device_booklists(opened_device, required_on_card=on_card)
+        locations = []
+        try:
+            locations = opened_device.upload_books(
+                [file_path],
+                [filename],
+                on_card=on_card,
+                end_session=False,
+                metadata=[mi],
+            )
+            opened_device.add_books_to_metadata(locations, [mi], booklists)
+            opened_device.sync_booklists(booklists, end_session=False)
+        finally:
+            cleanup_macos_sidecars(locations)
 
         return {
             "device_name": get_device_name(opened_device),
@@ -324,12 +328,22 @@ def media_type_from_format(fmt, data: bytes) -> str:
     return guess_image_media_type(data)
 
 
-def get_device_booklists(device):
+def get_device_booklists(device, required_on_card=None):
     booklists = []
-    for oncard in (None, "carda", "cardb"):
+    required_index = {None: 0, "carda": 1, "cardb": 2}[required_on_card]
+    for index, oncard in enumerate((None, "carda", "cardb")):
         try:
             booklists.append(device.books(oncard=oncard, end_session=False))
-        except Exception:
+        except Exception as exc:
+            if index == required_index:
+                location = (
+                    "main memory"
+                    if oncard is None
+                    else "storage card A"
+                    if oncard == "carda"
+                    else "storage card B"
+                )
+                raise RuntimeError(f"Could not read device book list for {location}: {exc}") from exc
             booklists.append(None)
     return tuple(booklists)
 
@@ -383,6 +397,70 @@ def require_string(payload: dict[str, Any], key: str) -> str:
     if not isinstance(value, str) or not value:
         raise ValueError(f"{key} is required")
     return value
+
+
+def cleanup_macos_sidecars(locations) -> None:
+    """Remove macOS AppleDouble sidecars that can confuse device import scans."""
+
+    paths = []
+    roots = set()
+    for location in locations:
+        if not location:
+            continue
+        raw_path = location[0]
+        if not raw_path:
+            continue
+        path = Path(str(raw_path))
+        paths.append(path)
+        roots.update(find_device_roots(path))
+
+    for path in paths:
+        clear_extended_attributes(path)
+        delete_appledouble_for(path)
+        for parent in path.parents:
+            delete_appledouble_for(parent)
+            if parent in roots:
+                break
+
+    for root in roots:
+        for name in ("metadata.calibre", "driveinfo.calibre"):
+            metadata_path = root / name
+            clear_extended_attributes(metadata_path)
+            delete_appledouble_for(metadata_path)
+
+
+def find_device_roots(path: Path) -> set[Path]:
+    roots = set()
+    for parent in path.parents:
+        if (parent / "metadata.calibre").exists() or (parent / "driveinfo.calibre").exists():
+            roots.add(parent)
+        if parent.parent == parent:
+            break
+    if not roots and len(path.parts) >= 3 and path.parts[1] == "Volumes":
+        roots.add(Path(*path.parts[:3]))
+    return roots
+
+
+def clear_extended_attributes(path: Path) -> None:
+    if not path.exists() or not hasattr(os, "listxattr"):
+        return
+    try:
+        attributes = os.listxattr(path)
+    except OSError:
+        return
+    for attribute in attributes:
+        try:
+            os.removexattr(path, attribute)
+        except OSError:
+            pass
+
+
+def delete_appledouble_for(path: Path) -> None:
+    sidecar = path.with_name("._" + path.name)
+    try:
+        sidecar.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def serialize_location(location) -> list[str | None]:
