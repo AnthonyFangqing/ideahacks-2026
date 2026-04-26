@@ -16,6 +16,9 @@ __pycache__/
 logs/
 *.log
 
+# Local Calibre library data
+library/
+
 # Editor files
 .DS_Store
 .idea/

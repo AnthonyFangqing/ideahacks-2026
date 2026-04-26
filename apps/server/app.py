@@ -1,9 +1,4 @@
-from flask import Flask
+from ideahacks_server import create_app
 
 
-app = Flask(__name__)
-
-
-@app.get("/")
-def index() -> str:
-    return "Hello Flask!"
+app = create_app()
