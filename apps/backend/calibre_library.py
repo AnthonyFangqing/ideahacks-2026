@@ -180,6 +180,18 @@ def import_file_to_library(
     metadata: dict[str, Any] | None = None,
     delete_after_import: bool = False,
 ) -> list[int]:
+    return import_file_to_library_with_report(
+        file_path,
+        metadata,
+        delete_after_import,
+    )["added_ids"]
+
+
+def import_file_to_library_with_report(
+    file_path: str,
+    metadata: dict[str, Any] | None = None,
+    delete_after_import: bool = False,
+) -> dict[str, Any]:
     library_path = configured_library_path()
     library_path.mkdir(parents=True, exist_ok=True)
 
@@ -188,6 +200,7 @@ def import_file_to_library(
         "add",
         "--library-path",
         str(library_path),
+        "--duplicates",
         file_path,
     ]
     if metadata:
@@ -215,7 +228,13 @@ def import_file_to_library(
     if delete_after_import:
         Path(file_path).unlink(missing_ok=True)
 
-    return parse_added_ids(result.stdout)
+    added_ids = parse_added_ids(result.stdout)
+    books = list_library_books()
+    duplicate_matches = duplicate_matches_for_added_books(books, added_ids)
+    return {
+        "added_ids": added_ids,
+        "duplicates": duplicate_matches,
+    }
 
 
 def delete_library_books(book_ids: list[int]) -> None:
@@ -296,6 +315,94 @@ def normalize_formats(formats: list[Any]) -> list[str]:
         if value and value not in normalized:
             normalized.append(value)
     return normalized
+
+
+def duplicate_matches_for_added_books(
+    books: list[dict[str, Any]],
+    added_ids: list[int],
+) -> list[dict[str, Any]]:
+    if not added_ids:
+        return []
+
+    books_by_id = {
+        book["id"]: book
+        for book in books
+        if isinstance(book.get("id"), int)
+    }
+    added_id_set = set(added_ids)
+    existing_books = [
+        book
+        for book in books
+        if isinstance(book.get("id"), int) and book["id"] not in added_id_set
+    ]
+
+    duplicates: list[dict[str, Any]] = []
+    for added_id in added_ids:
+        added_book = books_by_id.get(added_id)
+        if added_book is None:
+            continue
+        matches = [
+            existing
+            for existing in existing_books
+            if books_match_as_duplicates(added_book, existing)
+        ]
+        if matches:
+            duplicates.append({
+                "added_id": added_id,
+                "added_book": added_book,
+                "existing_books": matches,
+            })
+    return duplicates
+
+
+def books_match_as_duplicates(
+    incoming: dict[str, Any],
+    existing: dict[str, Any],
+) -> bool:
+    if fuzzy_title(incoming.get("title")) != fuzzy_title(existing.get("title")):
+        return False
+
+    incoming_authors = normalized_authors(incoming)
+    existing_authors = normalized_authors(existing)
+    if incoming_authors and not existing_authors.issuperset(incoming_authors):
+        return False
+
+    incoming_languages = normalized_languages(incoming)
+    existing_languages = normalized_languages(existing)
+    return not incoming_languages or not existing_languages or incoming_languages == existing_languages
+
+
+def fuzzy_title(raw_title: Any) -> str:
+    title = str(raw_title or "").strip().lower()
+    title = re.sub(r"[\[\](){}<>'\";,:#]", "", title)
+    title = re.sub(r"^(a|an|the)\s+", "", title)
+    title = re.sub(r"[-._]", " ", title)
+    return re.sub(r"\s+", " ", title).strip()
+
+
+def normalized_authors(book: dict[str, Any]) -> set[str]:
+    authors = book.get("authors")
+    if isinstance(authors, str):
+        authors = [authors]
+    if not isinstance(authors, list) or not authors:
+        display = book.get("authors_display")
+        authors = [display] if isinstance(display, str) else []
+    return {str(author).strip().lower() for author in authors if str(author).strip()}
+
+
+def normalized_languages(book: dict[str, Any]) -> tuple[str, ...]:
+    languages = book.get("languages")
+    if isinstance(languages, str):
+        languages = [languages]
+    if not isinstance(languages, list):
+        return ()
+    return tuple(
+        sorted(
+            str(language).strip().lower()
+            for language in languages
+            if str(language).strip() and str(language).strip().lower() != "und"
+        )
+    )
 
 
 def parse_added_ids(output: str) -> list[int]:

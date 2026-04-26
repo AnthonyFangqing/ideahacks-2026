@@ -21,7 +21,7 @@ from calibre_library import (
     CalibreLibraryError,
     delete_library_books,
     export_library_book,
-    import_file_to_library,
+    import_file_to_library_with_report,
     library_book_cover_path,
     library_status,
     list_library_books,
@@ -552,6 +552,7 @@ def api_import_to_library():
         return api_error("At least one book file is required", 400)
 
     added_ids: list[int] = []
+    duplicates: list[dict[str, Any]] = []
     temp_paths: list[Path] = []
     try:
         for uploaded_file in uploaded_files:
@@ -560,12 +561,12 @@ def api_import_to_library():
                 temp_path = Path(temp_dir) / filename
                 temp_paths.append(temp_path)
                 uploaded_file.save(temp_path)
-                added_ids.extend(
-                    import_file_to_library(
-                        str(temp_path),
-                        delete_after_import=True,
-                    )
+                import_result = import_file_to_library_with_report(
+                    str(temp_path),
+                    delete_after_import=True,
                 )
+                added_ids.extend(import_result["added_ids"])
+                duplicates.extend(import_result["duplicates"])
         books = decorate_library_books(list_library_books())
     except CalibreLibraryError as exc:
         for temp_path in temp_paths:
@@ -575,6 +576,7 @@ def api_import_to_library():
     return jsonify({
         "ok": True,
         "added_ids": added_ids,
+        "duplicates": duplicates,
         "library": library_status(),
         "books": books,
     })
@@ -677,6 +679,7 @@ def api_import_from_device():
         started_at = time.perf_counter()
         temp_paths: list[Path] = []
         added_ids: list[int] = []
+        duplicates: list[dict[str, Any]] = []
         try:
             app.logger.info("device.import waiting for device_operation_lock")
             update_transfer_job(job, stage="Waiting for reader", progress=0.1)
@@ -709,11 +712,13 @@ def api_import_from_device():
                         stage=f"Adding {index}/{total} to library",
                         progress=0.45 + ((index - 1) / total) * 0.25,
                     )
-                    added_ids.extend(import_file_to_library(
+                    import_result = import_file_to_library_with_report(
                         str(temp_path),
                         imported.get("metadata") or item["metadata"],
                         delete_after_import=True,
-                    ))
+                    )
+                    added_ids.extend(import_result["added_ids"])
+                    duplicates.extend(import_result["duplicates"])
                 update_transfer_job(job, stage="Refreshing library", progress=0.85)
                 books = decorate_library_books(list_library_books())
             reader = current_connected_e_reader()
@@ -725,6 +730,7 @@ def api_import_from_device():
         return {
             "ok": True,
             "added_ids": added_ids,
+            "duplicates": duplicates,
             "connected_e_reader": asdict(reader) if reader is not None else None,
             "books": books,
             "elapsed_seconds": round(time.perf_counter() - started_at, 2),
