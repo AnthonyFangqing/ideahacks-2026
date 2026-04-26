@@ -594,7 +594,40 @@ else
 fi
 
 # ----------------------------------------------------------------------------
-# 14. Start service
+# 14. Configure eth0 as shared connection (DHCP server for tablets)
+#     This lets the Pi hand out IPs to devices connected via ethernet.
+# ----------------------------------------------------------------------------
+log_step "Checking eth0 shared connection..."
+if nmcli connection show eth0-static &>/dev/null; then
+    log_skip "eth0 shared connection"
+else
+    # Check if eth0 exists at all
+    if ip link show eth0 &>/dev/null; then
+        log_info "Configuring eth0 as shared connection (192.168.10.1, DHCP range 10–254)..."
+        nmcli connection add type ethernet ifname eth0 con-name eth0-static \
+            ipv4.method shared ipv4.addresses 192.168.10.1/24 2>/dev/null || true
+        nmcli connection up eth0-static 2>/dev/null || true
+        log_success "eth0 shared: 192.168.10.1/24 (tablets will get DHCP)"
+    else
+        log_info "No eth0 interface — skipping shared connection setup"
+    fi
+fi
+
+# Also allow both eth0 and wlan0 in avahi so mDNS works on either
+if [[ -f "$AVAHI_CONF" ]]; then
+    if grep -q "^allow-interfaces=eth0,wlan0" "$AVAHI_CONF" 2>/dev/null; then
+        true  # already correct
+    elif grep -q "^allow-interfaces=wlan0" "$AVAHI_CONF" 2>/dev/null; then
+        sed -i 's/^allow-interfaces=wlan0/allow-interfaces=eth0,wlan0/' "$AVAHI_CONF"
+        if systemctl is-active --quiet avahi-daemon 2>/dev/null; then
+            systemctl restart avahi-daemon 2>/dev/null || true
+        fi
+        log_info "Avahi: added eth0 to allowed interfaces"
+    fi
+fi
+
+# ----------------------------------------------------------------------------
+# 15. Start service
 # ----------------------------------------------------------------------------
 log_step "Starting kiosk service..."
 if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
@@ -616,7 +649,7 @@ else
 fi
 
 # ----------------------------------------------------------------------------
-# 15. Summary
+# 16. Summary
 # ----------------------------------------------------------------------------
 PI_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 if [[ -z "$PI_IP" ]]; then
