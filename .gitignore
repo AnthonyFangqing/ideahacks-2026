@@ -49,3 +49,7 @@ temp/
 .yarn/
 !.yarn/releases
 .pnpm-store/
+
+# Python
+__pycache__
+

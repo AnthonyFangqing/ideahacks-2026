@@ -59,7 +59,7 @@ Vitest, husky, (this is a hackathon, we just need it to work)
 
 ## Server
 
-Hono, with zod validator (if necessary)
+Flask
 
 ## Frontend V1 – website
 
