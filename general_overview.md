@@ -11,6 +11,8 @@ Basically, a furniture item that displays and allows users to interact with eBoo
 the Kiosk will store eBooks, allow users to easily transfer books to and from and ereaders and the kiosk (“bookshelf”)  
 Allow family members to interact with the kiosk and share books more easily
 
+Should be friendly, very usable, a nice furniture piece, accessible to all ages, family-friendly, something you enjoy using, haptic / sound / visual feedback for using it (try to “unflatten” the glass touchscreen, make it feel tactile and enjoyable and not just an ipad), easy to use, convenient
+
 # Design Constraints/Dimensions
 
 all devices can be hardwired to each other.  
@@ -58,7 +60,8 @@ Biome
 Vitest, husky, (this is a hackathon, we just need it to work)
 
 ## Server
-Flask server using as much of calibre as possible
+
+Hono, with zod validator
 
 ## Frontend V1 – website
 
