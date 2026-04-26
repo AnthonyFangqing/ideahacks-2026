@@ -11,7 +11,9 @@
 }
 
 .status-panel,
-.reader-panel {
+.reader-panel,
+.library-tools,
+.notice-panel {
 	max-width: 1180px;
 	margin: 0 auto;
 }
@@ -132,10 +134,157 @@ h3 {
 	border-radius: 34px;
 }
 
+.notice-panel {
+	margin-bottom: 18px;
+	padding: 16px 18px;
+	border: 1px solid var(--line);
+	border-radius: 20px;
+	background: rgba(255, 252, 243, 0.9);
+	font-weight: 700;
+	color: var(--ink);
+}
+
+.notice-panel.error {
+	border-color: rgba(163, 65, 45, 0.32);
+	color: var(--bad);
+}
+
+.notice-panel.success {
+	border-color: rgba(51, 128, 89, 0.32);
+	color: var(--good);
+}
+
+.library-tools {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) minmax(360px, 0.9fr);
+	gap: 18px;
+	align-items: center;
+	margin-bottom: 18px;
+	padding: 18px;
+	border: 1px solid var(--line);
+	border-radius: 28px;
+	background: rgba(255, 252, 243, 0.78);
+	box-shadow: 0 24px 80px rgba(69, 44, 22, 0.08);
+}
+
+.library-tools strong {
+	display: block;
+	margin: 5px 0 8px;
+	font-size: 24px;
+	color: var(--ink);
+}
+
+.library-tools code {
+	display: block;
+	overflow-wrap: anywhere;
+	color: var(--muted);
+}
+
+.library-actions {
+	display: grid;
+	gap: 10px;
+}
+
+.library-tools form,
+.upload-form {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) auto auto;
+	gap: 8px;
+}
+
+.library-tools input,
+.file-picker,
+button {
+	border: 1px solid var(--line);
+	border-radius: 999px;
+	font: inherit;
+}
+
+.library-tools input {
+	min-width: 0;
+	padding: 12px 14px;
+	background: rgba(255, 255, 255, 0.74);
+	color: var(--ink);
+}
+
+.upload-form {
+	grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.file-picker {
+	position: relative;
+	min-width: 0;
+	padding: 12px 14px;
+	background: rgba(255, 255, 255, 0.74);
+	color: var(--muted);
+	font-weight: 700;
+	cursor: pointer;
+	overflow: hidden;
+}
+
+.file-picker span {
+	display: block;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.file-picker input {
+	position: absolute;
+	inset: 0;
+	opacity: 0;
+	cursor: pointer;
+}
+
+button {
+	cursor: pointer;
+	padding: 10px 14px;
+	background: var(--ink);
+	color: white;
+	font-weight: 800;
+	transition:
+		transform 160ms ease,
+		opacity 160ms ease;
+}
+
+button:hover:not(:disabled) {
+	transform: translateY(-1px);
+}
+
+button:disabled {
+	cursor: not-allowed;
+	opacity: 0.45;
+}
+
+button.danger {
+	background: var(--bad);
+}
+
+.transfer-layout {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+	gap: 18px;
+	max-width: 1480px;
+	margin: 0 auto;
+	align-items: start;
+}
+
+.transfer-layout .reader-panel {
+	max-height: calc(100vh - 28px);
+	max-width: none;
+	margin: 0;
+	overflow: auto;
+}
+
 .reader-summary {
+	position: sticky;
+	top: -28px;
+	z-index: 2;
 	display: grid;
 	grid-template-columns: minmax(0, 1fr);
 	margin-bottom: 28px;
+	padding-bottom: 18px;
+	background: rgba(255, 252, 243, 0.96);
 }
 
 .reader-summary p:last-child {
@@ -153,16 +302,28 @@ h3 {
 	list-style: none;
 }
 
+.book-grid.compact {
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	align-items: start;
+}
+
 .book-card {
-	min-height: 260px;
 	display: flex;
 	flex-direction: column;
 	padding: 18px;
 	border-radius: 22px;
 }
 
+.book-card h3 {
+	overflow-wrap: anywhere;
+}
+
+.book-card.complete {
+	outline: 2px solid rgba(51, 128, 89, 0.26);
+}
+
 .book-index {
-	margin-bottom: 42px;
+	margin-bottom: 24px;
 	color: var(--accent);
 }
 
@@ -192,6 +353,41 @@ h3 {
 	margin: 12px 0 0;
 	font-size: 13px;
 	color: var(--accent);
+}
+
+.formats {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin-top: 12px;
+	color: var(--muted);
+	font-size: 13px;
+}
+
+.formats span {
+	border-radius: 999px;
+	background: rgba(69, 44, 22, 0.08);
+	padding: 6px 9px;
+	color: var(--ink);
+	font-weight: 800;
+}
+
+.card-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin-top: 18px;
+}
+
+.card-actions button {
+	padding: 8px 10px;
+	font-size: 13px;
+}
+
+.inline-status {
+	margin: 12px 0 0;
+	color: var(--good);
+	font-weight: 800;
 }
 
 .empty-state {
@@ -233,7 +429,11 @@ h3 {
 	}
 
 	.status-panel,
+	.library-tools,
+	.library-tools form,
+	.transfer-layout,
 	.book-grid,
+	.book-grid.compact,
 	.backend-facts {
 		grid-template-columns: 1fr;
 	}

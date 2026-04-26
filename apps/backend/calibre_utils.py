@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -47,7 +48,7 @@ class CalibreHelperError(RuntimeError):
 def get_attached_device() -> dict[str, Any] | None:
     """Return the attached e-reader metadata, or None if no reader is attached."""
 
-    decoded = _run_helper()
+    decoded = _run_helper("scan")
     device = decoded.get("device")
     if device is None:
         return None
@@ -73,23 +74,76 @@ def get_attached_device_books() -> list[dict[str, Any]]:
     return device["books"]
 
 
-def _run_helper() -> dict[str, Any]:
+def send_book_to_device(
+    file_path: str,
+    filename: str,
+    metadata: dict[str, Any],
+    on_card: str | None = None,
+) -> dict[str, Any]:
+    """Send a local book file to the attached e-reader."""
+
+    decoded = _run_helper(
+        "send_to_device",
+        {
+            "file_path": file_path,
+            "filename": filename,
+            "metadata": metadata,
+            "on_card": on_card,
+        },
+    )
+    transfer = decoded.get("transfer")
+    if not isinstance(transfer, dict):
+        raise CalibreHelperError("Calibre helper returned an invalid transfer result")
+    return transfer
+
+
+def import_book_from_device(device_path: str, output_path: str) -> dict[str, Any]:
+    """Copy a book file from the attached e-reader to a local path."""
+
+    decoded = _run_helper(
+        "import_from_device",
+        {"device_path": device_path, "output_path": output_path},
+    )
+    imported = decoded.get("imported")
+    if not isinstance(imported, dict):
+        raise CalibreHelperError("Calibre helper returned an invalid import result")
+    return imported
+
+
+def delete_book_from_device(device_path: str) -> dict[str, Any]:
+    """Delete a book file from the attached e-reader."""
+
+    decoded = _run_helper("delete_from_device", {"device_path": device_path})
+    deleted = decoded.get("deleted")
+    if not isinstance(deleted, dict):
+        raise CalibreHelperError("Calibre helper returned an invalid delete result")
+    return deleted
+
+
+def _run_helper(operation: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    request = {"operation": operation, "payload": payload or {}}
+    started_at = time.perf_counter()
     try:
         with tempfile.NamedTemporaryFile(
             prefix="bookshelf_calibre_utils_helper"
         ) as helper:
             helper.write(HELPER_SCRIPT)
             helper.flush()
+            env = os.environ.copy()
+            env["BOOKSHELF_HELPER_REQUEST"] = json.dumps(request)
             result = subprocess.run(
                 [CALIBRE_DEBUG_EXECUTABLE, "-e", helper.name],
                 check=False,
                 capture_output=True,
                 text=True,
+                env=env,
             )
     except FileNotFoundError as exc:
         raise CalibreHelperError(
             f"{CALIBRE_DEBUG_EXECUTABLE!r} was not found on PATH"
         ) from exc
+
+    elapsed = time.perf_counter() - started_at
 
     payload = None
     for line in result.stdout.splitlines():
@@ -101,7 +155,9 @@ def _run_helper() -> dict[str, Any]:
         detail = (result.stderr or result.stdout).strip()
         if result.returncode == 0:
             detail = detail or "Calibre helper produced no JSON payload"
-        raise CalibreHelperError(detail)
+        raise CalibreHelperError(
+            f"{operation} failed after {elapsed:.2f}s: {detail}"
+        )
 
     try:
         decoded = json.loads(payload)
@@ -113,6 +169,7 @@ def _run_helper() -> dict[str, Any]:
 
     if decoded.get("ok") is not True:
         error = decoded.get("error") or "Calibre helper failed"
-        raise CalibreHelperError(str(error))
+        raise CalibreHelperError(f"{operation} failed after {elapsed:.2f}s: {error}")
 
+    decoded["_elapsed_seconds"] = round(elapsed, 2)
     return decoded

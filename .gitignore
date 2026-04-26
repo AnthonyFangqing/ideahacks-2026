@@ -1,3 +1,6 @@
+# Local Calibre library data
+apps/backend/data/
+
 # Dependencies
 node_modules/
 

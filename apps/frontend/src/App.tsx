@@ -1,8 +1,9 @@
 import "./App.css";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 
 type Book = {
 	title?: string;
+	authors?: string[];
 	authors_display?: string;
 	identifiers?: Record<string, string> | null;
 	series?: string | null;
@@ -11,6 +12,15 @@ type Book = {
 	languages?: string[];
 	pubdate?: string | null;
 	publisher?: string | null;
+	path?: string | null;
+	lpath?: string | null;
+	size?: number | null;
+	mime?: string | null;
+};
+
+type LibraryBook = Book & {
+	id: number;
+	formats: string[];
 };
 
 type ConnectedEReader = {
@@ -22,32 +32,81 @@ type StreamMessage = {
 	connected_e_reader: ConnectedEReader | null;
 };
 
-type ConnectionState = "connecting" | "connected" | "disconnected" | "error";
+type LibraryResponse = {
+	library: {
+		path: string;
+		exists: boolean;
+		metadata_db_exists: boolean;
+	};
+	books: LibraryBook[];
+};
 
-const getStreamUrl = () => {
+type DeviceResponse = {
+	connected_e_reader: ConnectedEReader | null;
+};
+
+type ConnectionState = "connecting" | "connected" | "disconnected" | "error";
+type TransferState = {
+	busyKey: string | null;
+	message: string | null;
+	error: string | null;
+	lastKey: string | null;
+};
+
+const getBackendHttpUrl = () => {
 	const configuredBackendUrl = import.meta.env.VITE_BACKEND_URL as
 		| string
 		| undefined;
 	if (configuredBackendUrl) {
-		const backendUrl = new URL(configuredBackendUrl);
-		backendUrl.protocol = backendUrl.protocol === "https:" ? "wss:" : "ws:";
-		backendUrl.pathname = "/stream";
-		return backendUrl.toString();
+		return configuredBackendUrl.replace(/\/$/, "");
 	}
 
-	const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-	const host =
-		window.location.port === "5005" ? window.location.host : "localhost:5005";
+	if (window.location.port === "5005") {
+		return window.location.origin;
+	}
 
-	return `${protocol}//${host}/stream`;
+	return `${window.location.protocol}//localhost:5005`;
 };
 
-const getBookKey = (book: Book) =>
-	book.identifiers
-		? JSON.stringify(book.identifiers)
-		: [book.title, book.authors_display, book.publisher, book.pubdate]
-				.filter(Boolean)
-				.join("|");
+const getStreamUrl = () => {
+	const backendUrl = new URL(getBackendHttpUrl());
+	backendUrl.protocol = backendUrl.protocol === "https:" ? "wss:" : "ws:";
+	backendUrl.pathname = "/stream";
+	return backendUrl.toString();
+};
+
+const getBookKey = (book: Book, fallback: string | number) =>
+	book.path ??
+	book.lpath ??
+	(book.identifiers ? JSON.stringify(book.identifiers) : undefined) ??
+	[book.title, book.authors_display, book.publisher, book.pubdate, fallback]
+		.filter(Boolean)
+		.join("|");
+
+const getDevicePath = (book: Book) => book.path ?? book.lpath ?? null;
+
+const formatBookAuthors = (book: Book) => {
+	if (book.authors_display) {
+		return book.authors_display;
+	}
+	if (book.authors?.length) {
+		return book.authors.join(" & ");
+	}
+	return "Unknown author";
+};
+
+const formatSize = (value?: number | null) => {
+	if (!value) {
+		return null;
+	}
+	if (value > 1024 * 1024) {
+		return `${(value / 1024 / 1024).toFixed(1)} MB`;
+	}
+	if (value > 1024) {
+		return `${Math.round(value / 1024)} KB`;
+	}
+	return `${value} B`;
+};
 
 const formatDate = (value?: string | null) => {
 	if (!value) {
@@ -62,11 +121,88 @@ const formatDate = (value?: string | null) => {
 	return parsed.getFullYear().toString();
 };
 
+const postJson = async <T,>(url: string, payload: Record<string, unknown>) => {
+	const response = await fetch(url, {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify(payload),
+	});
+	const decoded = (await response.json()) as T & { error?: string };
+	if (!response.ok) {
+		throw new Error(decoded.error || "Request failed");
+	}
+	return decoded;
+};
+
+const postForm = async <T,>(url: string, payload: FormData) => {
+	const response = await fetch(url, {
+		method: "POST",
+		body: payload,
+	});
+	const decoded = (await response.json()) as T & { error?: string };
+	if (!response.ok) {
+		throw new Error(decoded.error || "Request failed");
+	}
+	return decoded;
+};
+
 function App() {
 	const [connectionState, setConnectionState] =
 		useState<ConnectionState>("connecting");
 	const [reader, setReader] = useState<ConnectedEReader | null>(null);
-	const streamUrl = useMemo(getStreamUrl, []);
+	const [library, setLibrary] = useState<LibraryResponse["library"] | null>(
+		null,
+	);
+	const [libraryBooks, setLibraryBooks] = useState<LibraryBook[]>([]);
+	const [libraryQuery, setLibraryQuery] = useState("");
+	const [selectedLibraryFiles, setSelectedLibraryFiles] = useState<File[]>([]);
+	const [transferState, setTransferState] = useState<TransferState>({
+		busyKey: null,
+		message: null,
+		error: null,
+		lastKey: null,
+	});
+	const [apiBaseUrl] = useState(getBackendHttpUrl);
+	const [streamUrl] = useState(getStreamUrl);
+
+	const loadLibrary = async (query = libraryQuery) => {
+		const url = new URL(`${apiBaseUrl}/api/library`);
+		if (query.trim()) {
+			url.searchParams.set("query", query.trim());
+		}
+		const response = await fetch(url);
+		const decoded = (await response.json()) as LibraryResponse & {
+			error?: string;
+		};
+		if (!response.ok) {
+			throw new Error(decoded.error || "Failed to load library");
+		}
+		setLibrary(decoded.library);
+		setLibraryBooks(decoded.books);
+	};
+
+	useEffect(() => {
+		const url = new URL(`${apiBaseUrl}/api/library`);
+		void fetch(url)
+			.then(async (response) => {
+				const decoded = (await response.json()) as LibraryResponse & {
+					error?: string;
+				};
+				if (!response.ok) {
+					throw new Error(decoded.error || "Failed to load library");
+				}
+				setLibrary(decoded.library);
+				setLibraryBooks(decoded.books);
+			})
+			.catch((error: unknown) => {
+				setTransferState({
+					busyKey: null,
+					message: null,
+					error: error instanceof Error ? error.message : String(error),
+					lastKey: null,
+				});
+			});
+	}, [apiBaseUrl]);
 
 	useEffect(() => {
 		const socket = new WebSocket(streamUrl);
@@ -81,11 +217,15 @@ function App() {
 		});
 
 		socket.addEventListener("close", () => {
-			setConnectionState("disconnected");
+			setConnectionState((current) =>
+				current === "connected" ? current : "disconnected",
+			);
 		});
 
 		socket.addEventListener("error", () => {
-			setConnectionState("error");
+			setConnectionState((current) =>
+				current === "connected" ? current : "error",
+			);
 		});
 
 		return () => {
@@ -93,18 +233,138 @@ function App() {
 		};
 	}, [streamUrl]);
 
+	const runTransfer = async (
+		busyKey: string,
+		action: () => Promise<string>,
+	) => {
+		setTransferState({ busyKey, message: null, error: null, lastKey: null });
+		try {
+			const message = await action();
+			setTransferState({
+				busyKey: null,
+				message,
+				error: null,
+				lastKey: busyKey,
+			});
+		} catch (error) {
+			setTransferState({
+				busyKey: null,
+				message: null,
+				error: error instanceof Error ? error.message : String(error),
+				lastKey: busyKey,
+			});
+		}
+	};
+
+	const sendToReader = (book: LibraryBook) =>
+		runTransfer(`send-${book.id}`, async () => {
+			const response = await postJson<DeviceResponse>(
+				`${apiBaseUrl}/api/device/send`,
+				{ book_id: book.id },
+			);
+			setReader(response.connected_e_reader);
+			return `Sent "${book.title || "Untitled book"}" to the reader.`;
+		});
+
+	const importFromReader = (book: Book, deleteAfterImport: boolean) => {
+		const devicePath = getDevicePath(book);
+		if (!devicePath) {
+			setTransferState({
+				busyKey: null,
+				message: null,
+				error: "This device book is missing a Calibre path.",
+				lastKey: null,
+			});
+			return;
+		}
+
+		void runTransfer(`import-${devicePath}-${deleteAfterImport}`, async () => {
+			const response = await postJson<
+				{ books?: LibraryBook[] } & DeviceResponse
+			>(`${apiBaseUrl}/api/device/import`, {
+				device_path: devicePath,
+				delete_after_import: deleteAfterImport,
+				metadata: book,
+			});
+			setReader(response.connected_e_reader);
+			if (response.books) {
+				setLibraryBooks(response.books);
+			} else {
+				await loadLibrary();
+			}
+			await loadLibrary();
+			return deleteAfterImport
+				? `Moved "${book.title || "Untitled book"}" into the kiosk library.`
+				: `Copied "${book.title || "Untitled book"}" into the kiosk library.`;
+		});
+	};
+
+	const deleteFromReader = (book: Book) => {
+		const devicePath = getDevicePath(book);
+		if (!devicePath) {
+			setTransferState({
+				busyKey: null,
+				message: null,
+				error: "This device book is missing a Calibre path.",
+				lastKey: null,
+			});
+			return;
+		}
+
+		void runTransfer(`delete-${devicePath}`, async () => {
+			const response = await postJson<DeviceResponse>(
+				`${apiBaseUrl}/api/device/delete`,
+				{
+					device_path: devicePath,
+				},
+			);
+			setReader(response.connected_e_reader);
+			return `Deleted "${book.title || "Untitled book"}" from the reader.`;
+		});
+	};
+
+	const importSelectedFilesToLibrary = () => {
+		if (selectedLibraryFiles.length === 0) {
+			setTransferState({
+				busyKey: null,
+				message: null,
+				error: "Choose at least one book file first.",
+				lastKey: null,
+			});
+			return;
+		}
+
+		void runTransfer("library-upload", async () => {
+			const formData = new FormData();
+			for (const file of selectedLibraryFiles) {
+				formData.append("files", file);
+			}
+			const response = await postForm<LibraryResponse>(
+				`${apiBaseUrl}/api/library/import`,
+				formData,
+			);
+			setLibrary(response.library);
+			setLibraryBooks(response.books);
+			setSelectedLibraryFiles([]);
+			return `Imported ${selectedLibraryFiles.length} book${
+				selectedLibraryFiles.length === 1 ? "" : "s"
+			} into the kiosk library.`;
+		});
+	};
+
 	const books = reader?.books ?? [];
-	const featuredBooks = books.slice(0, 8);
+	const featuredDeviceBooks = books.slice(0, 12);
+	const featuredLibraryBooks = libraryBooks.slice(0, 12);
 
 	return (
 		<main className="kiosk-shell">
 			<section className="status-panel">
 				<div>
 					<p className="eyebrow">IdeaHacks Bookshelf</p>
-					<h1>Live e-reader dock</h1>
+					<h1>Calibre-powered book dock</h1>
 					<p className="lede">
-						This tiny frontend connects to the Flask WebSocket stream and shows
-						what the backend sees through Calibre.
+						Move books between a kiosk Calibre library and a docked e-reader
+						using the same Calibre device layer the backend already trusts.
 					</p>
 				</div>
 
@@ -118,67 +378,277 @@ function App() {
 				</div>
 			</section>
 
-			<section className="reader-panel">
-				<div className="reader-summary">
-					<p className="label">Connected reader</p>
-					<h2>{reader?.name ?? "No e-reader detected"}</h2>
-					<p>
-						{reader
-							? `${books.length} book${books.length === 1 ? "" : "s"} reported by the backend.`
-							: "Dock an e-reader to let the backend scan it with Calibre."}
-					</p>
+			{transferState.message || transferState.error ? (
+				<section
+					className={`notice-panel ${transferState.error ? "error" : "success"}`}
+				>
+					{transferState.error ?? transferState.message}
+				</section>
+			) : null}
+
+			<section className="library-tools">
+				<div>
+					<p className="label">Kiosk Calibre library</p>
+					<strong>{libraryBooks.length} books available</strong>
+					<code>{library?.path ?? "Loading library path..."}</code>
 				</div>
-
-				{featuredBooks.length > 0 ? (
-					<ul className="book-grid">
-						{featuredBooks.map((book, index) => (
-							<li key={getBookKey(book)} className="book-card">
-								<p className="book-index">
-									{String(index + 1).padStart(2, "0")}
-								</p>
-								<h3>{book.title || "Untitled book"}</h3>
-								<p className="author">
-									{book.authors_display || "Unknown author"}
-								</p>
-								<div className="metadata">
-									<span>{formatDate(book.pubdate)}</span>
-									<span>{book.publisher || "Unknown publisher"}</span>
-								</div>
-								{book.series ? (
-									<p className="series">
-										{book.series}
-										{book.series_index ? ` #${book.series_index}` : ""}
-									</p>
-								) : null}
-							</li>
-						))}
-					</ul>
-				) : (
-					<div className="empty-state">
-						<p className="shelf-mark">No books yet</p>
-						<p>
-							When the backend detects a reader, its book list will appear here
-							without refreshing the page.
-						</p>
-					</div>
-				)}
-
-				<div className="backend-facts">
-					<div>
-						<p className="label">Backend capability</p>
-						<strong>USB hotplug events</strong>
-					</div>
-					<div>
-						<p className="label">Backend capability</p>
-						<strong>Calibre device metadata</strong>
-					</div>
-					<div>
-						<p className="label">Backend capability</p>
-						<strong>Realtime WebSocket broadcast</strong>
-					</div>
+				<div className="library-actions">
+					<form
+						className="search-form"
+						onSubmit={(event) => {
+							event.preventDefault();
+							void loadLibrary().catch((error: unknown) => {
+								setTransferState({
+									busyKey: null,
+									message: null,
+									error: error instanceof Error ? error.message : String(error),
+									lastKey: null,
+								});
+							});
+						}}
+					>
+						<input
+							value={libraryQuery}
+							onChange={(event) => setLibraryQuery(event.target.value)}
+							placeholder='Search Calibre, e.g. tag:fiction or author:"Le Guin"'
+						/>
+						<button type="submit">Search</button>
+						<button
+							type="button"
+							onClick={() => {
+								setLibraryQuery("");
+								void loadLibrary("").catch((error: unknown) => {
+									setTransferState({
+										busyKey: null,
+										message: null,
+										error:
+											error instanceof Error ? error.message : String(error),
+										lastKey: null,
+									});
+								});
+							}}
+						>
+							Reset
+						</button>
+					</form>
+					<form
+						className="upload-form"
+						onSubmit={(event) => {
+							event.preventDefault();
+							importSelectedFilesToLibrary();
+						}}
+					>
+						<label className="file-picker">
+							<span>
+								{selectedLibraryFiles.length
+									? `${selectedLibraryFiles.length} file${
+											selectedLibraryFiles.length === 1 ? "" : "s"
+										} selected`
+									: "Choose book files"}
+							</span>
+							<input
+								type="file"
+								multiple
+								accept=".epub,.mobi,.azw,.azw3,.kfx,.pdf,.txt,.cbz,.cbr"
+								onChange={(event) =>
+									setSelectedLibraryFiles(
+										Array.from(event.currentTarget.files ?? []),
+									)
+								}
+							/>
+						</label>
+						<button
+							type="submit"
+							disabled={
+								transferState.busyKey !== null ||
+								selectedLibraryFiles.length === 0
+							}
+						>
+							Import to library
+						</button>
+					</form>
 				</div>
 			</section>
+
+			<section className="transfer-layout">
+				<section className="reader-panel">
+					<div className="reader-summary">
+						<p className="label">Connected reader</p>
+						<h2>{reader?.name ?? "No e-reader detected"}</h2>
+						<p>
+							{reader
+								? `${books.length} book${books.length === 1 ? "" : "s"} reported by Calibre.`
+								: "Dock an e-reader to scan it and enable transfer actions."}
+						</p>
+					</div>
+
+					{featuredDeviceBooks.length > 0 ? (
+						<ul className="book-grid compact">
+							{featuredDeviceBooks.map((book, index) => (
+								<DeviceBookCard
+									key={getBookKey(book, index)}
+									book={book}
+									index={index}
+									transferState={transferState}
+									onImport={importFromReader}
+									onDelete={deleteFromReader}
+								/>
+							))}
+						</ul>
+					) : (
+						<EmptyState
+							title="No device books yet"
+							body="When the backend detects a reader, its book list and import controls appear here."
+						/>
+					)}
+				</section>
+
+				<section className="reader-panel library-panel">
+					<div className="reader-summary">
+						<p className="label">Kiosk library</p>
+						<h2>Send books to reader</h2>
+						<p>
+							{library?.metadata_db_exists
+								? "Books come from the configured Calibre library."
+								: "No Calibre metadata.db exists yet. Import a reader book or add books with Calibre to initialize it."}
+						</p>
+					</div>
+
+					{featuredLibraryBooks.length > 0 ? (
+						<ul className="book-grid compact">
+							{featuredLibraryBooks.map((book, index) => (
+								<li
+									key={book.id}
+									className={`book-card library-book ${
+										transferState.lastKey === `send-${book.id}`
+											? "complete"
+											: ""
+									}`}
+								>
+									<BookCardContent book={book} index={index} />
+									<div className="formats">
+										{book.formats.length
+											? book.formats.map((format) => (
+													<span key={format}>{format}</span>
+												))
+											: "No formats"}
+									</div>
+									<div className="card-actions">
+										<button
+											type="button"
+											disabled={
+												transferState.busyKey !== null ||
+												!reader ||
+												book.formats.length === 0
+											}
+											onClick={() => void sendToReader(book)}
+										>
+											{transferState.busyKey === `send-${book.id}`
+												? "Sending..."
+												: "Send to reader"}
+										</button>
+									</div>
+									{transferState.lastKey === `send-${book.id}` ? (
+										<p className="inline-status">Sent to reader.</p>
+									) : null}
+								</li>
+							))}
+						</ul>
+					) : (
+						<EmptyState
+							title="No kiosk books yet"
+							body="Add books to the configured Calibre library or copy books from the connected reader."
+						/>
+					)}
+				</section>
+			</section>
 		</main>
+	);
+}
+
+function DeviceBookCard({
+	book,
+	index,
+	transferState,
+	onImport,
+	onDelete,
+}: {
+	book: Book;
+	index: number;
+	transferState: TransferState;
+	onImport: (book: Book, deleteAfterImport: boolean) => void;
+	onDelete: (book: Book) => void;
+}) {
+	const devicePath = getDevicePath(book) ?? getBookKey(book, index);
+	const copyKey = `import-${devicePath}-false`;
+	const moveKey = `import-${devicePath}-true`;
+	const deleteKey = `delete-${devicePath}`;
+	const completed =
+		transferState.lastKey === copyKey ||
+		transferState.lastKey === moveKey ||
+		transferState.lastKey === deleteKey;
+
+	return (
+		<li className={`book-card device-book ${completed ? "complete" : ""}`}>
+			<BookCardContent book={book} index={index} />
+			<div className="card-actions">
+				<button
+					type="button"
+					disabled={transferState.busyKey !== null}
+					onClick={() => onImport(book, false)}
+				>
+					{transferState.busyKey === copyKey ? "Copying..." : "Copy to kiosk"}
+				</button>
+				<button
+					type="button"
+					disabled={transferState.busyKey !== null}
+					onClick={() => onImport(book, true)}
+				>
+					{transferState.busyKey === moveKey ? "Moving..." : "Move to kiosk"}
+				</button>
+				<button
+					type="button"
+					className="danger"
+					disabled={transferState.busyKey !== null}
+					onClick={() => onDelete(book)}
+				>
+					{transferState.busyKey === deleteKey ? "Deleting..." : "Delete"}
+				</button>
+			</div>
+			{completed ? <p className="inline-status">Library updated.</p> : null}
+		</li>
+	);
+}
+
+function BookCardContent({ book, index }: { book: Book; index: number }) {
+	const size = formatSize(book.size);
+
+	return (
+		<>
+			<p className="book-index">{String(index + 1).padStart(2, "0")}</p>
+			<h3>{book.title || "Untitled book"}</h3>
+			<p className="author">{formatBookAuthors(book)}</p>
+			<div className="metadata">
+				<span>{formatDate(book.pubdate)}</span>
+				<span>{book.publisher || "Unknown publisher"}</span>
+				{size ? <span>{size}</span> : null}
+			</div>
+			{book.series ? (
+				<p className="series">
+					{book.series}
+					{book.series_index ? ` #${book.series_index}` : ""}
+				</p>
+			) : null}
+		</>
+	);
+}
+
+function EmptyState({ title, body }: { title: string; body: string }) {
+	return (
+		<div className="empty-state">
+			<p className="shelf-mark">{title}</p>
+			<p>{body}</p>
+		</div>
 	);
 }
 
