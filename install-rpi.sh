@@ -565,15 +565,15 @@ if [[ -f "$AVAHI_CONF" ]]; then
             # Remove any existing allow/deny lines from previous runs
             sed -i '/^allow-interfaces=/d' "$AVAHI_CONF" 2>/dev/null
             sed -i '/^deny-interfaces=/d' "$AVAHI_CONF" 2>/dev/null
-            # Add new config before [reflector] section
-            sed -i "/\[reflector\]/i\\allow-interfaces=${PRIMARY_IFACE}\n" "$AVAHI_CONF" 2>/dev/null || \
-                echo -e "\nallow-interfaces=${PRIMARY_IFACE}" >> "$AVAHI_CONF"
-            if [[ -n "$DENY_LIST" ]]; then
-                sed -i "/^allow-interfaces=${PRIMARY_IFACE}/a\\deny-interfaces=${DENY_LIST}" "$AVAHI_CONF" 2>/dev/null || true
-            fi
+            # Insert into [server] section — both keys must be there, not in [publish]
+            sed -i "/^\[server\]/a\\allow-interfaces=${PRIMARY_IFACE}\ndeny-interfaces=${DENY_LIST:-}" "$AVAHI_CONF" 2>/dev/null
             if systemctl is-active --quiet avahi-daemon 2>/dev/null; then
-                systemctl restart avahi-daemon
-                log_success "Avahi: mDNS on ${PRIMARY_IFACE} only (denied: ${DENY_LIST:-none})"
+                if systemctl restart avahi-daemon 2>/dev/null; then
+                    log_success "Avahi: mDNS on ${PRIMARY_IFACE} only (denied: ${DENY_LIST:-none})"
+                else
+                    log_warn "Avahi restart failed — check /etc/avahi/avahi-daemon.conf for errors"
+                    log_info "  mDNS config saved; will apply on next boot"
+                fi
             else
                 log_info "Avahi configured for ${PRIMARY_IFACE} (will apply on boot)"
             fi
