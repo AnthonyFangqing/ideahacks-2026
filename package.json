@@ -6,7 +6,9 @@
 	"private": true,
 	"type": "module",
 	"scripts": {
-		"dev": "pnpm -r --parallel dev",
+		"dev": "concurrently -n frontend,backend -c cyan,green \"pnpm dev:frontend\" \"pnpm dev:backend\"",
+		"dev:frontend": "pnpm --filter web dev",
+		"dev:backend": "cd apps/backend && uv run python main.py",
 		"build": "pnpm -r build",
 		"lint": "biome check .",
 		"format": "biome check --write .",
@@ -19,6 +21,7 @@
 	"packageManager": "pnpm@10.33.2",
 	"devDependencies": {
 		"@biomejs/biome": "^2.4.13",
+		"concurrently": "^9.2.1",
 		"husky": "^9.1.7",
 		"typescript": "^6.0.3",
 		"vitest": "^4.1.5"

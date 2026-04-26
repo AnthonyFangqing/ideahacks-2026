@@ -1,12 +1,41 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
 
-CALIBRE_DEBUG_EXECUTABLE = "calibre-debug"
+
+def _find_calibre_debug() -> str:
+    """Find calibre-debug executable across platforms."""
+    if path := shutil.which("calibre-debug"):
+        return path
+
+    # Platform-specific fallbacks
+    candidates = []
+    if sys.platform == "darwin":
+        candidates.append("/Applications/calibre.app/Contents/MacOS/calibre-debug")
+    elif sys.platform.startswith("linux"):
+        candidates.extend([
+            "/usr/bin/calibre-debug",
+            "/opt/calibre/calibre-debug",
+            "/usr/local/bin/calibre-debug",
+        ])
+
+    for candidate in candidates:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+
+    raise CalibreHelperError(
+        "calibre-debug not found. Install Calibre or ensure it's on PATH."
+    )
+
+
+CALIBRE_DEBUG_EXECUTABLE = _find_calibre_debug()
 HELPER_JSON_PREFIX = "__BOOKSHELF_JSON__="
 HELPER_SCRIPT = Path(__file__).with_name("calibre_utils_helper.py").read_bytes()
 
@@ -55,7 +84,6 @@ def _run_helper() -> dict[str, Any]:
                 [CALIBRE_DEBUG_EXECUTABLE, "-e", helper.name],
                 check=False,
                 capture_output=True,
-                env={},
                 text=True,
             )
     except FileNotFoundError as exc:

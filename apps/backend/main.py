@@ -119,7 +119,18 @@ def stop_libusb_event_loop() -> None:
 def libusb_event_loop() -> None:
     global libusb_context
 
-    with usb1.USBContext() as context:
+    context = usb1.USBContext()
+    try:
+        context.open()
+    except OSError as exc:
+        app.logger.warning(
+            "libusb hotplug monitoring is disabled: %s. "
+            "Install native libusb to auto-refresh when devices are plugged in.",
+            exc,
+        )
+        return
+
+    try:
         libusb_context = context
         if not context.hasCapability(usb1.CAP_HAS_HOTPLUG):
             app.logger.warning("libusb hotplug events are not supported")
@@ -145,6 +156,9 @@ def libusb_event_loop() -> None:
         finally:
             context.hotplugDeregisterCallback(callback_handle)
             libusb_context = None
+    finally:
+        libusb_context = None
+        context.close()
 
 
 atexit.register(stop_libusb_event_loop)
@@ -180,4 +194,4 @@ def stream(ws) -> None:
 
 if __name__ == "__main__":
     start_background_services()
-    app.run(host="0.0.0.0", port=5000, debug=True, use_reloader=False)
+    app.run(host="0.0.0.0", port=5005, debug=True, use_reloader=False)
