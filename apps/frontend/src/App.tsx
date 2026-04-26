@@ -1,5 +1,5 @@
 import "./App.css";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 type Book = {
 	title?: string;
@@ -28,10 +28,6 @@ type ConnectedEReader = {
 	books: Book[];
 };
 
-type StreamMessage = {
-	connected_e_reader: ConnectedEReader | null;
-};
-
 type LibraryResponse = {
 	library: {
 		path: string;
@@ -45,7 +41,7 @@ type DeviceResponse = {
 	connected_e_reader: ConnectedEReader | null;
 };
 
-type TransferJob<T = Record<string, unknown>> = {
+type TransferJob<T = unknown> = {
 	id: string;
 	kind: string;
 	status: "queued" | "running" | "completed" | "failed";
@@ -60,6 +56,18 @@ type JobStartResponse<T> = {
 	job: TransferJob<T>;
 };
 
+type DeviceStateMessage = {
+	type?: "device_state";
+	connected_e_reader: ConnectedEReader | null;
+};
+
+type TransferJobMessage = {
+	type: "transfer_job";
+	job: TransferJob;
+};
+
+type StreamMessage = DeviceStateMessage | TransferJobMessage;
+
 type ConnectionState = "connecting" | "connected" | "disconnected" | "error";
 type TransferState = {
 	busyKey: string | null;
@@ -69,6 +77,14 @@ type TransferState = {
 	message: string | null;
 	error: string | null;
 	lastKey: string | null;
+};
+
+type JobResolver<T> = {
+	busyKey: string;
+	resolve: (result: T) => void;
+	reject: (error: Error) => void;
+	catchUpTimer: number;
+	fallbackTimer: number;
 };
 
 const getBackendHttpUrl = () => {
@@ -185,6 +201,13 @@ function App() {
 	});
 	const [apiBaseUrl] = useState(getBackendHttpUrl);
 	const [streamUrl] = useState(getStreamUrl);
+	const jobResolvers = useRef<Map<string, JobResolver<unknown>>>(new Map());
+	const activeJobKeys = useRef<Map<string, string>>(new Map());
+	const connectionStateRef = useRef<ConnectionState>("connecting");
+
+	useEffect(() => {
+		connectionStateRef.current = connectionState;
+	}, [connectionState]);
 
 	const loadLibrary = async (query = libraryQuery) => {
 		const url = new URL(`${apiBaseUrl}/api/library`);
@@ -228,6 +251,50 @@ function App() {
 			});
 	}, [apiBaseUrl]);
 
+	const applyJobProgress = useCallback((busyKey: string, job: TransferJob) => {
+		setTransferState({
+			busyKey,
+			jobId: job.id,
+			stage: job.stage,
+			progress: job.progress,
+			message: null,
+			error: null,
+			lastKey: null,
+		});
+	}, []);
+
+	const handleStreamJob = useCallback(
+		(job: TransferJob) => {
+			const resolver = jobResolvers.current.get(job.id);
+			const busyKey = resolver?.busyKey ?? activeJobKeys.current.get(job.id);
+			if (!busyKey) {
+				return;
+			}
+
+			applyJobProgress(busyKey, job);
+			if (job.status === "failed") {
+				if (resolver) {
+					window.clearTimeout(resolver.catchUpTimer);
+					window.clearTimeout(resolver.fallbackTimer);
+					jobResolvers.current.delete(job.id);
+					activeJobKeys.current.delete(job.id);
+					resolver.reject(new Error(job.error || "Transfer failed"));
+				}
+				return;
+			}
+			if (job.status === "completed" && job.result) {
+				if (resolver) {
+					window.clearTimeout(resolver.catchUpTimer);
+					window.clearTimeout(resolver.fallbackTimer);
+					jobResolvers.current.delete(job.id);
+					activeJobKeys.current.delete(job.id);
+					resolver.resolve(job.result);
+				}
+			}
+		},
+		[applyJobProgress],
+	);
+
 	useEffect(() => {
 		const socket = new WebSocket(streamUrl);
 
@@ -237,6 +304,10 @@ function App() {
 
 		socket.addEventListener("message", (event) => {
 			const message = JSON.parse(event.data) as StreamMessage;
+			if ("job" in message) {
+				handleStreamJob(message.job);
+				return;
+			}
 			setReader(message.connected_e_reader);
 		});
 
@@ -255,25 +326,11 @@ function App() {
 		return () => {
 			socket.close();
 		};
-	}, [streamUrl]);
+	}, [streamUrl, handleStreamJob]);
 
-	const waitForJob = async <T,>(
-		busyKey: string,
-		startedJob: TransferJob<T>,
-	) => {
-		let job = startedJob;
-		while (job.status === "queued" || job.status === "running") {
-			setTransferState({
-				busyKey,
-				jobId: job.id,
-				stage: job.stage,
-				progress: job.progress,
-				message: null,
-				error: null,
-				lastKey: null,
-			});
-			await new Promise((resolve) => window.setTimeout(resolve, 700));
-			const response = await fetch(`${apiBaseUrl}/api/jobs/${job.id}`);
+	const pollJobUntilComplete = async <T,>(busyKey: string, jobId: string) => {
+		while (true) {
+			const response = await fetch(`${apiBaseUrl}/api/jobs/${jobId}`);
 			const decoded = (await response.json()) as {
 				job?: TransferJob<T>;
 				error?: string;
@@ -281,16 +338,84 @@ function App() {
 			if (!response.ok || !decoded.job) {
 				throw new Error(decoded.error || "Failed to check transfer job");
 			}
-			job = decoded.job;
+
+			const job = decoded.job;
+			applyJobProgress(busyKey, job);
+			if (job.status === "failed") {
+				throw new Error(job.error || "Transfer failed");
+			}
+			if (job.status === "completed") {
+				if (!job.result) {
+					throw new Error("Transfer finished without a result");
+				}
+				return job.result;
+			}
+			await new Promise((resolve) => window.setTimeout(resolve, 1000));
+		}
+	};
+
+	const waitForJob = async <T,>(
+		busyKey: string,
+		startedJob: TransferJob<T>,
+	) => {
+		applyJobProgress(busyKey, startedJob);
+		activeJobKeys.current.set(startedJob.id, busyKey);
+
+		if (startedJob.status === "failed") {
+			activeJobKeys.current.delete(startedJob.id);
+			throw new Error(startedJob.error || "Transfer failed");
+		}
+		if (startedJob.status === "completed") {
+			activeJobKeys.current.delete(startedJob.id);
+			if (!startedJob.result) {
+				throw new Error("Transfer finished without a result");
+			}
+			return startedJob.result;
 		}
 
-		if (job.status === "failed") {
-			throw new Error(job.error || "Transfer failed");
+		if (connectionStateRef.current !== "connected") {
+			try {
+				return await pollJobUntilComplete<T>(busyKey, startedJob.id);
+			} finally {
+				activeJobKeys.current.delete(startedJob.id);
+			}
 		}
-		if (!job.result) {
-			throw new Error("Transfer finished without a result");
-		}
-		return job.result;
+
+		return await new Promise<T>((resolve, reject) => {
+			const catchUpTimer = window.setTimeout(() => {
+				if (!jobResolvers.current.has(startedJob.id)) {
+					return;
+				}
+				void fetch(`${apiBaseUrl}/api/jobs/${startedJob.id}`)
+					.then(async (response) => {
+						const decoded = (await response.json()) as {
+							job?: TransferJob<T>;
+							error?: string;
+						};
+						if (!response.ok || !decoded.job) {
+							return;
+						}
+						handleStreamJob(decoded.job);
+					})
+					.catch(() => undefined);
+			}, 750);
+			const fallbackTimer = window.setTimeout(() => {
+				window.clearTimeout(catchUpTimer);
+				jobResolvers.current.delete(startedJob.id);
+				void pollJobUntilComplete<T>(busyKey, startedJob.id)
+					.then(resolve)
+					.catch(reject)
+					.finally(() => activeJobKeys.current.delete(startedJob.id));
+			}, 30000);
+
+			jobResolvers.current.set(startedJob.id, {
+				busyKey,
+				resolve: resolve as (result: unknown) => void,
+				reject,
+				catchUpTimer,
+				fallbackTimer,
+			});
+		});
 	};
 
 	const runTransfer = async (

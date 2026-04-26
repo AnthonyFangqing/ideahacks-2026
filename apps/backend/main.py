@@ -136,11 +136,14 @@ def serialize_connected_e_reader() -> dict[str, Any] | None:
 
 
 def connected_e_reader_message() -> str:
-    return json.dumps({"connected_e_reader": serialize_connected_e_reader()})
+    return json.dumps({
+        "type": "device_state",
+        "connected_e_reader": serialize_connected_e_reader(),
+    })
 
 
-def broadcast_connected_e_reader() -> None:
-    message = connected_e_reader_message()
+def broadcast_stream_message(payload: dict[str, Any]) -> None:
+    message = json.dumps(payload)
     with stream_clients_lock:
         clients = list(stream_clients)
 
@@ -155,6 +158,13 @@ def broadcast_connected_e_reader() -> None:
         with stream_clients_lock:
             for client in disconnected_clients:
                 stream_clients.discard(client)
+
+
+def broadcast_connected_e_reader() -> None:
+    broadcast_stream_message({
+        "type": "device_state",
+        "connected_e_reader": serialize_connected_e_reader(),
+    })
 
 
 def start_libusb_event_loop() -> None:
@@ -242,12 +252,16 @@ def update_transfer_job(job: TransferJob, **updates: Any) -> None:
         for key, value in updates.items():
             setattr(job, key, value)
         job.updated_at = time.time()
+        serialized = serialize_transfer_job(job)
+    broadcast_stream_message({"type": "transfer_job", "job": serialized})
 
 
 def start_transfer_job(kind: str, work) -> TransferJob:
     job = TransferJob(id=uuid.uuid4().hex, kind=kind)
     with transfer_jobs_lock:
         transfer_jobs[job.id] = job
+        serialized = serialize_transfer_job(job)
+    broadcast_stream_message({"type": "transfer_job", "job": serialized})
 
     def run() -> None:
         started_at = time.perf_counter()
@@ -514,6 +528,13 @@ def stream(ws) -> None:
     try:
         try:
             ws.send(connected_e_reader_message())
+            with transfer_jobs_lock:
+                jobs = list(transfer_jobs.values())
+            for job in jobs:
+                ws.send(json.dumps({
+                    "type": "transfer_job",
+                    "job": serialize_transfer_job(job),
+                }))
         except Exception:
             return
         while True:
