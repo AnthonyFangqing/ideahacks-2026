@@ -245,22 +245,16 @@ else
 fi
 
 log_step "Checking pnpm..."
-PNPM_HOME="${SERVICE_HOME}/.local/share/pnpm"
-export PNPM_HOME
-export PATH="${PNPM_HOME}:$PATH"
 
 if command -v pnpm &>/dev/null; then
     log_skip "pnpm"
 else
-    log_info "Installing pnpm..."
-    # Install pnpm for the service user
-    su - "$SERVICE_USER" -c 'curl -fsSL https://get.pnpm.io/install.sh | ENV="$HOME/.bashrc" sh -'
-    # If still not in PATH, fall back to global npm install
+    log_info "Installing pnpm via corepack (Node.js built-in)..."
+    # corepack is bundled with Node.js 16+. It manages pnpm/yarn globally.
+    corepack enable
+    corepack prepare pnpm@latest --activate
     if ! command -v pnpm &>/dev/null; then
-        npm install -g pnpm
-    fi
-    if ! command -v pnpm &>/dev/null; then
-        log_fatal "pnpm installation failed.\n   Try manually: curl -fsSL https://get.pnpm.io/install.sh | sh -"
+        log_fatal "pnpm installation failed.\n   Try manually: corepack enable && corepack prepare pnpm@latest --activate"
         exit 1
     fi
     log_success "pnpm installed: $(pnpm -v)"
@@ -350,13 +344,11 @@ fi
 # ----------------------------------------------------------------------------
 log_step "Installing JavaScript dependencies..."
 cd "$INSTALL_DIR"
-su - "$SERVICE_USER" -c "cd '${INSTALL_DIR}' && '${PNPM_HOME}/pnpm' install" || \
-    su - "$SERVICE_USER" -c "cd '${INSTALL_DIR}' && pnpm install"
+su - "$SERVICE_USER" -c "cd '${INSTALL_DIR}' && pnpm install"
 log_success "JavaScript dependencies installed"
 
 log_step "Building frontend for production..."
-su - "$SERVICE_USER" -c "cd '${INSTALL_DIR}' && '${PNPM_HOME}/pnpm' build" || \
-    su - "$SERVICE_USER" -c "cd '${INSTALL_DIR}' && pnpm build"
+su - "$SERVICE_USER" -c "cd '${INSTALL_DIR}' && pnpm build"
 
 # Verify the dist folder was produced
 if [[ ! -d "${INSTALL_DIR}/apps/frontend/dist" ]]; then
@@ -405,7 +397,7 @@ log_step "Checking systemd service '${SERVICE_NAME}'..."
 CALIBRE_DIR=$(dirname "$(which calibre-debug)")
 NODE_DIR=$(dirname "$(which node)")
 SYSTEM_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-SERVICE_PATH="${CALIBRE_DIR}:${UV_BIN%/*}:${NODE_DIR}:${PNPM_HOME}:${SYSTEM_PATH}"
+SERVICE_PATH="${CALIBRE_DIR}:${UV_BIN%/*}:${NODE_DIR}:${SYSTEM_PATH}"
 
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 NEW_SERVICE_HASH=$(cat <<EOF | sha256sum | awk '{print $1}'
