@@ -525,21 +525,21 @@ fi
 # 13. Hostname, /etc/hosts, and mDNS (avahi) configuration
 # ----------------------------------------------------------------------------
 log_step "Checking hostname..."
-if [[ "$(hostname)" != "ideahacks-kiosk" ]]; then
-    hostnamectl set-hostname ideahacks-kiosk 2>/dev/null || true
-    log_info "Hostname set to 'ideahacks-kiosk'"
+if [[ "$(hostname)" != "pi" ]]; then
+    hostnamectl set-hostname pi 2>/dev/null || true
+    log_info "Hostname set to 'pi' (mDNS: pi.local)"
 else
     log_skip "Hostname"
 fi
 
 # Ensure /etc/hosts has the hostname (avahi and sudo need this)
 log_step "Checking /etc/hosts..."
-if ! grep -q "ideahacks-kiosk" /etc/hosts; then
+if ! grep -q "\tpi" /etc/hosts; then
     # If cloud-init manages /etc/hosts, update the template too
-    sed -i "s/127.0.1.1 .*/127.0.1.1 ideahacks-kiosk/" /etc/cloud/templates/hosts.debian.tmpl 2>/dev/null || true
+    sed -i "s/127.0.1.1 .*/127.0.1.1 pi/" /etc/cloud/templates/hosts.debian.tmpl 2>/dev/null || true
     # Add to /etc/hosts (at the top, before cloud-init comments if any)
-    sed -i "1i\\127.0.1.1\\tideahacks-kiosk" /etc/hosts
-    log_success "Added ideahacks-kiosk to /etc/hosts"
+    sed -i "1i\\127.0.1.1\\tpi" /etc/hosts
+    log_success "Added pi to /etc/hosts"
 else
     log_skip "/etc/hosts"
 fi
@@ -549,8 +549,13 @@ fi
 log_step "Checking avahi mDNS..."
 AVAHI_CONF="/etc/avahi/avahi-daemon.conf"
 if [[ -f "$AVAHI_CONF" ]]; then
-    # Find the interface used for the default route
-    PRIMARY_IFACE=$(ip route show default 2>/dev/null | awk '{print $5}' | head -1)
+    # Prefer eth0 over wlan0: if ethernet is up with an IP, use it;
+    # otherwise fall back to whichever interface has a default route.
+    if ip -o -4 addr show eth0 2>/dev/null | grep -q inet; then
+        PRIMARY_IFACE=eth0
+    else
+        PRIMARY_IFACE=$(ip route show default 2>/dev/null | awk '{print $5}' | head -1)
+    fi
     if [[ -z "$PRIMARY_IFACE" ]]; then
         # No default route — fall back to first non-lo interface with an IP
         PRIMARY_IFACE=$(ip -o -4 addr show 2>/dev/null | grep -v '^\S*\s*lo' | awk '{print $2}' | head -1)
@@ -585,7 +590,7 @@ if [[ -f "$AVAHI_CONF" ]]; then
         log_info "  Fix manually: edit allow-interfaces in ${AVAHI_CONF}"
     fi
 else
-    log_warn "Avahi config not found at ${AVAHI_CONF}. mDNS (ideahacks-kiosk.local) may not work."
+    log_warn "Avahi config not found at ${AVAHI_CONF}. mDNS (pi.local) may not work."
 fi
 
 # ----------------------------------------------------------------------------
@@ -627,7 +632,7 @@ echo -e "  ${BOLD}Project directory:${NC}  ${INSTALL_DIR}"
 echo -e "  ${BOLD}Service user:${NC}       ${SERVICE_USER}"
 echo -e "  ${BOLD}Service name:${NC}       ${SERVICE_NAME}"
 echo -e "  ${BOLD}Web UI URL:${NC}         http://${PI_IP}:5005"
-echo -e "  ${BOLD}mDNS (Bonjour):${NC}     http://ideahacks-kiosk.local:5005"
+echo -e "  ${BOLD}mDNS (Bonjour):${NC}     http://pi.local:5005"
 echo ""
 echo -e "  ${BOLD}Useful commands:${NC}"
 echo -e "    Start service:     ${CYAN}sudo systemctl start ${SERVICE_NAME}${NC}"
