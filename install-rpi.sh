@@ -544,27 +544,45 @@ else
     log_skip "/etc/hosts"
 fi
 
-# Restrict avahi to wired interface so mDNS advertises the correct IP
+# Restrict avahi to the primary network interface so mDNS advertises the correct IP.
+# Auto-detect the interface with a default route (eth0 if wired, wlan0 if WiFi-only).
 log_step "Checking avahi mDNS..."
 AVAHI_CONF="/etc/avahi/avahi-daemon.conf"
 if [[ -f "$AVAHI_CONF" ]]; then
-    if ! grep -q "^allow-interfaces=eth0" "$AVAHI_CONF" 2>/dev/null; then
-        # Uncomment or add allow-interfaces=eth0
-        sed -i "s/#allow-interfaces=.*/allow-interfaces=eth0/" "$AVAHI_CONF" 2>/dev/null || \
-            sed -i "/\[reflector\]/i\\allow-interfaces=eth0\n" "$AVAHI_CONF" 2>/dev/null || \
-            echo -e "\nallow-interfaces=eth0" >> "$AVAHI_CONF"
-        # Also deny wireless/VPN interfaces to prevent wrong IP advertisement
-        if ! grep -q "^deny-interfaces=" "$AVAHI_CONF" 2>/dev/null; then
-            sed -i "/^allow-interfaces=eth0/a\\deny-interfaces=wlan0,tailscale0" "$AVAHI_CONF" 2>/dev/null || true
-        fi
-        if systemctl is-active --quiet avahi-daemon 2>/dev/null; then
-            systemctl restart avahi-daemon
-            log_success "Avahi restarted with eth0-only mDNS"
+    # Find the interface used for the default route
+    PRIMARY_IFACE=$(ip route show default 2>/dev/null | awk '{print $5}' | head -1)
+    if [[ -z "$PRIMARY_IFACE" ]]; then
+        # No default route — fall back to first non-lo interface with an IP
+        PRIMARY_IFACE=$(ip -o -4 addr show 2>/dev/null | grep -v '^\S*\s*lo' | awk '{print $2}' | head -1)
+    fi
+    # Build deny list: all other non-lo interfaces
+    ALL_IFACES=$(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep -v '^lo$' | grep -v "^${PRIMARY_IFACE}$")
+    DENY_LIST=$(echo "$ALL_IFACES" | tr '\n' ',' | sed 's/,$//')
+
+    if [[ -n "$PRIMARY_IFACE" ]]; then
+        # Check if already configured (idempotent)
+        if ! grep -q "^allow-interfaces=${PRIMARY_IFACE}" "$AVAHI_CONF" 2>/dev/null; then
+            # Remove any existing allow/deny lines from previous runs
+            sed -i '/^allow-interfaces=/d' "$AVAHI_CONF" 2>/dev/null
+            sed -i '/^deny-interfaces=/d' "$AVAHI_CONF" 2>/dev/null
+            # Add new config before [reflector] section
+            sed -i "/\[reflector\]/i\\allow-interfaces=${PRIMARY_IFACE}\n" "$AVAHI_CONF" 2>/dev/null || \
+                echo -e "\nallow-interfaces=${PRIMARY_IFACE}" >> "$AVAHI_CONF"
+            if [[ -n "$DENY_LIST" ]]; then
+                sed -i "/^allow-interfaces=${PRIMARY_IFACE}/a\\deny-interfaces=${DENY_LIST}" "$AVAHI_CONF" 2>/dev/null || true
+            fi
+            if systemctl is-active --quiet avahi-daemon 2>/dev/null; then
+                systemctl restart avahi-daemon
+                log_success "Avahi: mDNS on ${PRIMARY_IFACE} only (denied: ${DENY_LIST:-none})"
+            else
+                log_info "Avahi configured for ${PRIMARY_IFACE} (will apply on boot)"
+            fi
         else
-            log_info "Avahi configured (not running yet — will use config on boot)"
+            log_skip "Avahi mDNS (already set to ${PRIMARY_IFACE})"
         fi
     else
-        log_skip "Avahi mDNS"
+        log_warn "No primary network interface detected. mDNS may advertise the wrong IP."
+        log_info "  Fix manually: edit allow-interfaces in ${AVAHI_CONF}"
     fi
 else
     log_warn "Avahi config not found at ${AVAHI_CONF}. mDNS (ideahacks-kiosk.local) may not work."
