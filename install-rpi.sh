@@ -522,14 +522,52 @@ UDEV
 fi
 
 # ----------------------------------------------------------------------------
-# 13. Hostname & optional network tweaks
+# 13. Hostname, /etc/hosts, and mDNS (avahi) configuration
 # ----------------------------------------------------------------------------
 log_step "Checking hostname..."
 if [[ "$(hostname)" != "ideahacks-kiosk" ]]; then
     hostnamectl set-hostname ideahacks-kiosk 2>/dev/null || true
-    log_info "Hostname set to 'ideahacks-kiosk' (mDNS: ideahacks-kiosk.local)"
+    log_info "Hostname set to 'ideahacks-kiosk'"
 else
     log_skip "Hostname"
+fi
+
+# Ensure /etc/hosts has the hostname (avahi and sudo need this)
+log_step "Checking /etc/hosts..."
+if ! grep -q "ideahacks-kiosk" /etc/hosts; then
+    # If cloud-init manages /etc/hosts, update the template too
+    sed -i "s/127.0.1.1 .*/127.0.1.1 ideahacks-kiosk/" /etc/cloud/templates/hosts.debian.tmpl 2>/dev/null || true
+    # Add to /etc/hosts (at the top, before cloud-init comments if any)
+    sed -i "1i\\127.0.1.1\\tideahacks-kiosk" /etc/hosts
+    log_success "Added ideahacks-kiosk to /etc/hosts"
+else
+    log_skip "/etc/hosts"
+fi
+
+# Restrict avahi to wired interface so mDNS advertises the correct IP
+log_step "Checking avahi mDNS..."
+AVAHI_CONF="/etc/avahi/avahi-daemon.conf"
+if [[ -f "$AVAHI_CONF" ]]; then
+    if ! grep -q "^allow-interfaces=eth0" "$AVAHI_CONF" 2>/dev/null; then
+        # Uncomment or add allow-interfaces=eth0
+        sed -i "s/#allow-interfaces=.*/allow-interfaces=eth0/" "$AVAHI_CONF" 2>/dev/null || \
+            sed -i "/\[reflector\]/i\\allow-interfaces=eth0\n" "$AVAHI_CONF" 2>/dev/null || \
+            echo -e "\nallow-interfaces=eth0" >> "$AVAHI_CONF"
+        # Also deny wireless/VPN interfaces to prevent wrong IP advertisement
+        if ! grep -q "^deny-interfaces=" "$AVAHI_CONF" 2>/dev/null; then
+            sed -i "/^allow-interfaces=eth0/a\\deny-interfaces=wlan0,tailscale0" "$AVAHI_CONF" 2>/dev/null || true
+        fi
+        if systemctl is-active --quiet avahi-daemon 2>/dev/null; then
+            systemctl restart avahi-daemon
+            log_success "Avahi restarted with eth0-only mDNS"
+        else
+            log_info "Avahi configured (not running yet — will use config on boot)"
+        fi
+    else
+        log_skip "Avahi mDNS"
+    fi
+else
+    log_warn "Avahi config not found at ${AVAHI_CONF}. mDNS (ideahacks-kiosk.local) may not work."
 fi
 
 # ----------------------------------------------------------------------------
