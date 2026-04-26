@@ -8,8 +8,8 @@
 	"scripts": {
 		"dev": "pnpm -r --parallel dev",
 		"build": "pnpm -r build",
-		"lint": "biome check .",
-		"format": "biome check --write .",
+		"lint": "biome check . && pnpm --filter server lint",
+		"format": "biome check --write . && pnpm --filter server format",
 		"test": "vitest run --passWithNoTests",
 		"prepare": "husky"
 	},

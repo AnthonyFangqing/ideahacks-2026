@@ -1,18 +1,10 @@
 {
 	"name": "server",
-	"type": "module",
+	"private": true,
 	"scripts": {
-		"dev": "tsx watch src/index.ts",
-		"build": "tsc",
-		"start": "node dist/index.js"
-	},
-	"dependencies": {
-		"@hono/node-server": "^1.19.14",
-		"hono": "^4.12.15"
-	},
-	"devDependencies": {
-		"@types/node": "^20.11.17",
-		"tsx": "^4.7.1",
-		"typescript": "^5.8.3"
+		"dev": "uv run flask --app app run --debug --port 3000",
+		"start": "uv run flask --app app run --host 0.0.0.0 --port 3000",
+		"lint": "uv run ruff check . && uv run ty check .",
+		"format": "uv run ruff format ."
 	}
 }

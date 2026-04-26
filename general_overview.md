@@ -58,9 +58,14 @@ Biome
 Vitest, husky, (this is a hackathon, we just need it to work)
 
 ## Server
-
-Hono, with zod validator (if necessary)
+Flask server using as much of calibre as possible
 
 ## Frontend V1 – website
 
 Vite, React 
+
+# Functionality
+
+- move books from Raspberry Pi drive to the ereader storage. drag and drop preferred  
+- go into “display mode”, where it displays the covers of books favorited by the user (will need to grab this image from the epub)  
+- a connection to Project Gutenberg or some other way to search for and find ebooks would be nice
