@@ -1,39 +1,37 @@
 #!/bin/bash
 #
 # ============================================================================
-# IdeaHacks 2026 — Raspberry Pi 4 Kiosk Installation Script
+# IdeaHacks 2026 — Raspberry Pi 4 Kiosk Installation Script (LEAN)
 # ============================================================================
-# This script installs everything needed to run the Ideahacks bookshelf kiosk
-# on a Raspberry Pi 4 from a fresh Raspberry Pi OS (Debian Bookworm) image.
+# Designed for fresh Raspberry Pi OS (64-bit) on 8 GB SD cards.
+# Uses only prebuilt binaries — no compilation, no build dependencies.
 #
 # WHAT IT DOES:
-#   1. Updates system packages and installs build dependencies
-#   2. Installs Calibre e-book management (required by the backend)
-#   3. Installs Node.js 22 + pnpm (required by the frontend build)
-#   4. Installs uv (modern Python package manager)
-#   5. Installs Python 3.14 (required by backend pyproject.toml)
-#   6. Clones or uses the existing ideahacks-2026 repository
-#   7. Builds the frontend for production
+#   1. apt-get update (no upgrade — saves ~1-2 GB)
+#   2. Installs only runtime system libraries (no -dev packages)
+#   3. Installs Calibre via official installer (skips if already present)
+#   4. Installs Node.js 22 + pnpm (skips if already present)
+#   5. Installs uv + Python 3.14 via prebuilt binaries (skips if present)
+#   6. Clones or uses existing ideahacks-2026 repo
+#   7. Builds frontend for production
 #   8. Installs Python backend dependencies
-#   9. Patches Flask to serve the built frontend from frontend/dist
-#  10. Creates a systemd service so the kiosk starts on boot
-#  11. Sets up USB permissions for e-reader hotplug detection
+#   9. Patches Flask to serve frontend/dist
+#  10. Creates systemd service for auto-start on boot
+#  11. Sets up USB permissions for e-reader hotplug
+#
+# SPACE FOOTPRINT (estimated on fresh Pi OS):
+#   OS base:          ~4.5 GB
+#   Calibre:          ~600 MB
+#   Node.js 22:       ~200 MB
+#   uv + Python 3.14: ~150 MB
+#   Repo + node_modules + venv: ~400 MB
+#   Total after install: ~5.8 GB / 6.6 GB
 #
 # USAGE:
-#   1. Flash Raspberry Pi OS (64-bit) to your SD card, boot, and enable SSH.
-#   2. Copy this script to the Pi:
-#        scp install-rpi.sh pi@raspberrypi.local:~/
-#   3. SSH in and run it:
-#        ssh pi@raspberrypi.local
-#        sudo bash install-rpi.sh
-#   4. When finished, open http://<pi-ip>:5005 on your tablet.
+#   sudo bash install-rpi.sh
 #
-# TROUBLESHOOTING:
-#   - If the script fails, it will tell you exactly which step failed.
-#   - Check logs after install:  sudo journalctl -u ideahacks -f
-#   - Verify Calibre:             calibre-debug --version
-#   - Verify Python:              cd apps/backend && uv run python --version
-#   - Check USB devices:          lsusb
+# RESUME-FRIENDLY:
+#   If the script fails or you re-run it, already-completed steps are skipped.
 # ============================================================================
 
 set -euo pipefail
@@ -66,6 +64,7 @@ log_success(){ echo -e "   ${GREEN}✓${NC} $1"; }
 log_warn()   { echo -e "   ${YELLOW}⚠${NC} $1"; }
 log_error()  { echo -e "   ${RED}✗${NC} $1"; }
 log_fatal()  { echo -e "${RED}${BOLD}FATAL:${NC} $1"; }
+log_skip()   { echo -e "   ${GREEN}⊘${NC} $1 (already done, skipping)"; }
 
 # ----------------------------------------------------------------------------
 # Error trap — prints helpful context when anything fails
@@ -80,7 +79,7 @@ The command above failed. Here is how to recover:
   4. If Python ${PYTHON_VERSION} fails to install, uv may not have a build yet.
      In that case, lower requires-python in apps/backend/pyproject.toml to >=3.11
      and re-run this script.
-  5. For Calibre issues, try:  sudo apt install -y calibre calibre-bin
+  5. For Calibre issues, try:  sudo apt install -y calibre
   6. After fixing the underlying issue, re-run:  sudo bash install-rpi.sh
 
 Quick diagnostics you can run right now:
@@ -111,7 +110,6 @@ fi
 if [[ -z "${SERVICE_USER}" ]]; then
     SERVICE_USER="${SUDO_USER:-}"
     if [[ -z "$SERVICE_USER" || "$SERVICE_USER" == "root" ]]; then
-        # Fall back to common Pi usernames
         for candidate in pi ideahacks kiosk; do
             if id "$candidate" &>/dev/null; then
                 SERVICE_USER="$candidate"
@@ -156,36 +154,40 @@ fi
 log_success "Internet connection OK"
 
 # ----------------------------------------------------------------------------
-# 1. System update & base dependencies
+# 1. System update — lean: update package lists only, no full upgrade
 # ----------------------------------------------------------------------------
-log_step "Updating system packages (this may take a few minutes)..."
+log_step "Updating package lists..."
 apt-get update
-apt-get upgrade -y
+log_success "Package lists updated"
 
-log_step "Installing system dependencies..."
-apt-get install -y \
-    git curl wget ca-certificates gnupg \
-    build-essential pkg-config \
-    libssl-dev zlib1g-dev libbz2-dev \
-    libreadline-dev libsqlite3-dev \
-    libncursesw5-dev xz-utils tk-dev \
-    libxml2-dev libxmlsec1-dev libffi-dev liblzma-dev \
-    libjpeg-dev libpng-dev libfreetype6-dev \
-    libusb-1.0-0-dev libusb-1.0-0 \
-    libmtp-dev libudisks2-dev \
+# ----------------------------------------------------------------------------
+# 2. Minimal runtime dependencies (no build tools, no -dev packages)
+# ----------------------------------------------------------------------------
+# We intentionally skip build-essential and all -dev packages.
+# Everything we install (Node, uv, Python, Calibre) comes as prebuilt binaries.
+log_step "Installing minimal runtime dependencies..."
+
+apt-get install -y --no-install-recommends \
+    git curl ca-certificates gnupg \
+    libusb-1.0-0 \
     systemd || {
         log_error "apt install failed. Trying with --fix-missing..."
         apt-get install -f -y
-        apt-get install -y git curl wget build-essential libusb-1.0-0-dev libusb-1.0-0 systemd
+        apt-get install -y --no-install-recommends git curl ca-certificates libusb-1.0-0 systemd
     }
-log_success "System dependencies installed"
+
+apt-get clean
+log_success "Runtime dependencies installed"
 
 # ----------------------------------------------------------------------------
-# 2. Calibre  (official installer — newer, better e-reader support)
+# 3. Calibre (official installer — skips if already present)
 # ----------------------------------------------------------------------------
-log_step "Installing Calibre (official installer)..."
+log_step "Checking Calibre..."
 
-if ! command -v calibre-debug &>/dev/null; then
+if command -v calibre-debug &>/dev/null; then
+    log_skip "Calibre"
+else
+    log_info "Calibre not found. Installing via official installer..."
     wget -nv -O- https://download.calibre-ebook.com/linux-installer.sh | sh /dev/stdin install_dir=/opt/calibre isolated=y
     ln -sf /opt/calibre/calibre-debug /usr/local/bin/calibre-debug || true
     ln -sf /opt/calibre/calibredb     /usr/local/bin/calibredb     || true
@@ -195,7 +197,8 @@ fi
 # Fallback to distro package only if the official installer didn't land
 if ! command -v calibre-debug &>/dev/null; then
     log_warn "Official installer failed. Falling back to distribution Calibre..."
-    apt-get install -y calibre || true
+    apt-get install -y --no-install-recommends calibre || true
+    apt-get clean
 fi
 
 if ! command -v calibre-debug &>/dev/null; then
@@ -204,54 +207,57 @@ if ! command -v calibre-debug &>/dev/null; then
 fi
 
 CALIBRE_VERSION=$(calibre-debug --version 2>/dev/null || echo "unknown")
-log_success "Calibre installed: ${CALIBRE_VERSION}"
+log_success "Calibre ready: ${CALIBRE_VERSION}"
 log_info "calibre-debug path: $(which calibre-debug)"
 log_info "calibredb   path: $(which calibredb)"
 
 # ----------------------------------------------------------------------------
-# 3. Node.js & pnpm
+# 4. Node.js & pnpm (skips if already correct version)
 # ----------------------------------------------------------------------------
-log_step "Installing Node.js ${NODE_MAJOR}..."
-if ! command -v node &>/dev/null || [[ "$(node -v | cut -d'v' -f2 | cut -d'.' -f1)" != "$NODE_MAJOR" ]]; then
-    curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash -
-    apt-get install -y nodejs
-fi
-log_success "Node.js: $(node -v)"
+log_step "Checking Node.js ${NODE_MAJOR}..."
 
-log_step "Installing pnpm..."
+if command -v node &>/dev/null && [[ "$(node -v | cut -d'v' -f2 | cut -d'.' -f1)" == "$NODE_MAJOR" ]]; then
+    log_skip "Node.js ${NODE_MAJOR}"
+else
+    log_info "Installing Node.js ${NODE_MAJOR}..."
+    curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash -
+    apt-get install -y --no-install-recommends nodejs
+    apt-get clean
+    log_success "Node.js installed: $(node -v)"
+fi
+
+log_step "Checking pnpm..."
 PNPM_HOME="${SERVICE_HOME}/.local/share/pnpm"
 export PNPM_HOME
 export PATH="${PNPM_HOME}:$PATH"
 
-if ! command -v pnpm &>/dev/null; then
+if command -v pnpm &>/dev/null; then
+    log_skip "pnpm"
+else
+    log_info "Installing pnpm..."
     # Install pnpm for the service user
     su - "$SERVICE_USER" -c 'curl -fsSL https://get.pnpm.io/install.sh | ENV="$HOME/.bashrc" sh -'
-    # Ensure it is in PATH for the remainder of this script
-    if [[ -f "${SERVICE_HOME}/.bashrc" ]]; then
-        grep -q 'export PNPM_HOME=' "${SERVICE_HOME}/.bashrc" || true
+    # If still not in PATH, fall back to global npm install
+    if ! command -v pnpm &>/dev/null; then
+        npm install -g pnpm
     fi
+    if ! command -v pnpm &>/dev/null; then
+        log_fatal "pnpm installation failed.\n   Try manually: curl -fsSL https://get.pnpm.io/install.sh | sh -"
+        exit 1
+    fi
+    log_success "pnpm installed: $(pnpm -v)"
 fi
-
-if ! command -v pnpm &>/dev/null; then
-    # Fallback: install globally via npm
-    npm install -g pnpm
-fi
-
-if ! command -v pnpm &>/dev/null; then
-    log_fatal "pnpm installation failed.\n   Try manually: curl -fsSL https://get.pnpm.io/install.sh | sh -"
-    exit 1
-fi
-log_success "pnpm: $(pnpm -v)"
 
 # ----------------------------------------------------------------------------
-# 4. uv (Python toolchain)
+# 5. uv (Python toolchain) — skips if already present
 # ----------------------------------------------------------------------------
-log_step "Installing uv (Python toolchain)..."
-UV_BIN=""
+log_step "Checking uv..."
+
 if command -v uv &>/dev/null; then
     UV_BIN=$(which uv)
+    log_skip "uv"
 else
-    # Install into a temporary location then move system-wide so everyone can use it
+    log_info "Installing uv..."
     curl -LsSf https://astral.sh/uv/install.sh | sh
     if [[ -f "$HOME/.cargo/bin/uv" ]]; then
         cp "$HOME/.cargo/bin/uv" /usr/local/bin/uv
@@ -260,43 +266,52 @@ else
         cp "$HOME/.local/bin/uv" /usr/local/bin/uv
         chmod +x /usr/local/bin/uv
     fi
+    if ! command -v uv &>/dev/null; then
+        log_fatal "uv installation failed.\n   Try manually: curl -LsSf https://astral.sh/uv/install.sh | sh"
+        exit 1
+    fi
+    UV_BIN=$(which uv)
+    log_success "uv installed: $(${UV_BIN} --version)"
 fi
 
-if ! command -v uv &>/dev/null; then
-    log_fatal "uv installation failed.\n   Try manually: curl -LsSf https://astral.sh/uv/install.sh | sh"
-    exit 1
-fi
-
-UV_BIN=$(which uv)
-log_success "uv: $(${UV_BIN} --version)"
 log_info "uv binary: ${UV_BIN}"
 
 # ----------------------------------------------------------------------------
-# 5. Python ${PYTHON_VERSION}
+# 6. Python ${PYTHON_VERSION} — skips if already installed via uv
 # ----------------------------------------------------------------------------
-log_step "Installing Python ${PYTHON_VERSION} via uv..."
-if ! ${UV_BIN} python install "${PYTHON_VERSION}" 2>/dev/null; then
-    log_warn "uv python install ${PYTHON_VERSION} failed. Trying '3.14.0' explicitly..."
-    if ! ${UV_BIN} python install 3.14.0 2>/dev/null; then
-        log_fatal "Could not install Python ${PYTHON_VERSION} via uv.\n   uv may not yet provide a prebuilt ${PYTHON_VERSION} for ${ARCH}.\n   Options:\n     1. Change 'requires-python' in apps/backend/pyproject.toml to '>=3.11' and retry.\n     2. Build Python ${PYTHON_VERSION} from source (takes ~30 min on a Pi 4)."
-        exit 1
+log_step "Checking Python ${PYTHON_VERSION}..."
+
+if ${UV_BIN} python find "${PYTHON_VERSION}" &>/dev/null 2>&1 || ${UV_BIN} python find 3.14.0 &>/dev/null 2>&1; then
+    log_skip "Python ${PYTHON_VERSION}"
+else
+    log_info "Installing Python ${PYTHON_VERSION} via uv..."
+    if ! ${UV_BIN} python install "${PYTHON_VERSION}" 2>/dev/null; then
+        log_warn "uv python install ${PYTHON_VERSION} failed. Trying '3.14.0' explicitly..."
+        if ! ${UV_BIN} python install 3.14.0 2>/dev/null; then
+            log_fatal "Could not install Python ${PYTHON_VERSION} via uv.\n   uv may not yet provide a prebuilt ${PYTHON_VERSION} for ${ARCH}.\n   Options:\n     1. Change 'requires-python' in apps/backend/pyproject.toml to '>=3.11' and retry.\n     2. Build Python ${PYTHON_VERSION} from source (takes ~30 min on a Pi 4)."
+            exit 1
+        fi
     fi
+    log_success "Python ${PYTHON_VERSION} installed"
 fi
-log_success "Python ${PYTHON_VERSION} ready"
 
 # ----------------------------------------------------------------------------
-# 6. Clone or verify repository
+# 7. Clone or verify repository
 # ----------------------------------------------------------------------------
 if [[ "$USING_LOCAL_REPO" -eq 0 ]]; then
-    log_step "Cloning repository..."
-    if [[ -z "$REPO_URL" ]]; then
-        log_fatal "REPO_URL is empty and this script is not inside the repo.\n   Please set REPO_URL at the top of this script, e.g.:\n   REPO_URL=\"https://github.com/yourname/ideahacks-2026.git\""
-        exit 1
+    if [[ -d "${INSTALL_DIR}/.git" ]]; then
+        log_skip "Repository clone"
+    else
+        log_step "Cloning repository..."
+        if [[ -z "$REPO_URL" ]]; then
+            log_fatal "REPO_URL is empty and this script is not inside the repo.\n   Please set REPO_URL at the top of this script, e.g.:\n   REPO_URL=\"https://github.com/yourname/ideahacks-2026.git\""
+            exit 1
+        fi
+        rm -rf "$INSTALL_DIR"
+        git clone "$REPO_URL" "$INSTALL_DIR"
+        chown -R "${SERVICE_USER}:${SERVICE_USER}" "$INSTALL_DIR"
+        log_success "Repository cloned to ${INSTALL_DIR}"
     fi
-    rm -rf "$INSTALL_DIR"
-    git clone "$REPO_URL" "$INSTALL_DIR"
-    chown -R "${SERVICE_USER}:${SERVICE_USER}" "$INSTALL_DIR"
-    log_success "Repository cloned to ${INSTALL_DIR}"
 else
     log_step "Using existing repository at ${INSTALL_DIR}"
     chown -R "${SERVICE_USER}:${SERVICE_USER}" "$INSTALL_DIR"
@@ -313,7 +328,7 @@ if [[ ! -f "${INSTALL_DIR}/apps/frontend/package.json" ]]; then
 fi
 
 # ----------------------------------------------------------------------------
-# 7. JavaScript dependencies & frontend build
+# 8. JavaScript dependencies & frontend build
 # ----------------------------------------------------------------------------
 log_step "Installing JavaScript dependencies..."
 cd "$INSTALL_DIR"
@@ -333,7 +348,7 @@ fi
 log_success "Frontend built successfully"
 
 # ----------------------------------------------------------------------------
-# 8. Python backend dependencies
+# 9. Python backend dependencies
 # ----------------------------------------------------------------------------
 log_step "Installing Python backend dependencies (uv sync)..."
 cd "${INSTALL_DIR}/apps/backend"
@@ -346,16 +361,15 @@ if ! su - "$SERVICE_USER" -c "cd '${INSTALL_DIR}/apps/backend' && ${UV_BIN} run 
 fi
 
 # ----------------------------------------------------------------------------
-# 9. Patch Flask to serve built frontend from frontend/dist
+# 10. Patch Flask to serve built frontend from frontend/dist
 # ----------------------------------------------------------------------------
 log_step "Configuring Flask to serve production frontend..."
 BACKEND_MAIN="${INSTALL_DIR}/apps/backend/main.py"
 
-# Show the user what the original line looks like
-log_info "Original FRONTEND_DIR in main.py:"
+log_info "Current FRONTEND_DIR in main.py:"
 grep -n 'FRONTEND_DIR = Path' "$BACKEND_MAIN" | head -n 1 || true
 
-if grep -q 'FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"' "$BACKEND_MAIN"; then
+if grep -q 'FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"$' "$BACKEND_MAIN"; then
     sed -i 's|FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"|FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend" / "dist"|' "$BACKEND_MAIN"
     log_success "Patched FRONTEND_DIR → frontend/dist"
 elif grep -q 'FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend" / "dist"' "$BACKEND_MAIN"; then
@@ -366,18 +380,17 @@ else
 fi
 
 # ----------------------------------------------------------------------------
-# 10. Create systemd service
+# 11. Create systemd service (skips if already exists with same content)
 # ----------------------------------------------------------------------------
-log_step "Creating systemd service '${SERVICE_NAME}'..."
+log_step "Checking systemd service '${SERVICE_NAME}'..."
 
-# Build a PATH that includes everything the backend needs
 CALIBRE_DIR=$(dirname "$(which calibre-debug)")
 NODE_DIR=$(dirname "$(which node)")
 SYSTEM_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 SERVICE_PATH="${CALIBRE_DIR}:${UV_BIN%/*}:${NODE_DIR}:${PNPM_HOME}:${SYSTEM_PATH}"
 
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
-cat > "$SERVICE_FILE" <<EOF
+NEW_SERVICE_HASH=$(cat <<EOF | sha256sum | awk '{print $1}'
 [Unit]
 Description=IdeaHacks Bookshelf Kiosk
 After=network-online.target
@@ -391,8 +404,6 @@ WorkingDirectory=${INSTALL_DIR}/apps/backend
 Environment="PATH=${SERVICE_PATH}"
 Environment="PYTHONUNBUFFERED=1"
 Environment="HOME=${SERVICE_HOME}"
-# If you want to store the Calibre library somewhere else (e.g. external SSD):
-# Environment="IDEAHACKS_CALIBRE_LIBRARY=/mnt/bookshelf/calibre-library"
 ExecStart=${UV_BIN} run python main.py
 Restart=on-failure
 RestartSec=5
@@ -402,22 +413,82 @@ StandardError=journal
 [Install]
 WantedBy=multi-user.target
 EOF
+)
 
-systemctl daemon-reload
-systemctl enable "$SERVICE_NAME"
-log_success "Systemd service installed and enabled"
+if [[ -f "$SERVICE_FILE" ]]; then
+    OLD_SERVICE_HASH=$(sha256sum "$SERVICE_FILE" | awk '{print $1}')
+    if [[ "$OLD_SERVICE_HASH" == "$NEW_SERVICE_HASH" ]]; then
+        log_skip "Systemd service"
+    else
+        log_info "Updating systemd service..."
+        cat > "$SERVICE_FILE" <<EOF
+[Unit]
+Description=IdeaHacks Bookshelf Kiosk
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${SERVICE_USER}
+Group=${SERVICE_USER}
+WorkingDirectory=${INSTALL_DIR}/apps/backend
+Environment="PATH=${SERVICE_PATH}"
+Environment="PYTHONUNBUFFERED=1"
+Environment="HOME=${SERVICE_HOME}"
+ExecStart=${UV_BIN} run python main.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        systemctl daemon-reload
+        systemctl enable "$SERVICE_NAME"
+        log_success "Systemd service updated"
+    fi
+else
+    log_info "Creating systemd service..."
+    cat > "$SERVICE_FILE" <<EOF
+[Unit]
+Description=IdeaHacks Bookshelf Kiosk
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${SERVICE_USER}
+Group=${SERVICE_USER}
+WorkingDirectory=${INSTALL_DIR}/apps/backend
+Environment="PATH=${SERVICE_PATH}"
+Environment="PYTHONUNBUFFERED=1"
+Environment="HOME=${SERVICE_HOME}"
+ExecStart=${UV_BIN} run python main.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    systemctl enable "$SERVICE_NAME"
+    log_success "Systemd service installed and enabled"
+fi
 
 # ----------------------------------------------------------------------------
-# 11. USB / e-reader permissions
+# 12. USB / e-reader permissions
 # ----------------------------------------------------------------------------
 log_step "Setting up USB permissions for e-reader detection..."
 
-# Add user to plugdev group for libusb access
 usermod -aG plugdev "$SERVICE_USER" 2>/dev/null || true
 
-# Create udev rules for common e-reader vendors
 UDEV_FILE="/etc/udev/rules.d/99-ereader.rules"
-if [[ ! -f "$UDEV_FILE" ]]; then
+if [[ -f "$UDEV_FILE" ]]; then
+    log_skip "USB udev rules"
+else
     cat > "$UDEV_FILE" <<'UDEV'
 # IdeaHacks — USB permissions for common e-readers
 # Kobo
@@ -438,39 +509,43 @@ UDEV
     udevadm control --reload-rules
     udevadm trigger
     log_success "USB udev rules installed"
-else
-    log_info "USB udev rules already exist at ${UDEV_FILE}"
 fi
 
 # ----------------------------------------------------------------------------
-# 12. Hostname & optional network tweaks
+# 13. Hostname & optional network tweaks
 # ----------------------------------------------------------------------------
-log_step "Setting hostname..."
+log_step "Checking hostname..."
 if [[ "$(hostname)" != "ideahacks-kiosk" ]]; then
     hostnamectl set-hostname ideahacks-kiosk 2>/dev/null || true
     log_info "Hostname set to 'ideahacks-kiosk' (mDNS: ideahacks-kiosk.local)"
+else
+    log_skip "Hostname"
 fi
 
 # ----------------------------------------------------------------------------
-# 13. Start service
+# 14. Start service
 # ----------------------------------------------------------------------------
 log_step "Starting kiosk service..."
-systemctl start "$SERVICE_NAME" || {
-    log_warn "Service failed to start immediately. This is sometimes normal on first install."
-    log_info "Checking service status..."
-    systemctl status "$SERVICE_NAME" --no-pager || true
-}
-
-sleep 2
-if systemctl is-active --quiet "$SERVICE_NAME"; then
-    log_success "Service is running!"
+if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+    log_skip "Service already running"
 else
-    log_warn "Service is not active yet. It may need a reboot, or check:"
-    log_info "  sudo journalctl -u ${SERVICE_NAME} -n 50 --no-pager"
+    systemctl start "$SERVICE_NAME" || {
+        log_warn "Service failed to start immediately. This is sometimes normal on first install."
+        log_info "Checking service status..."
+        systemctl status "$SERVICE_NAME" --no-pager || true
+    }
+
+    sleep 2
+    if systemctl is-active --quiet "$SERVICE_NAME"; then
+        log_success "Service is running!"
+    else
+        log_warn "Service is not active yet. It may need a reboot, or check:"
+        log_info "  sudo journalctl -u ${SERVICE_NAME} -n 50 --no-pager"
+    fi
 fi
 
 # ----------------------------------------------------------------------------
-# 14. Summary
+# 15. Summary
 # ----------------------------------------------------------------------------
 PI_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 if [[ -z "$PI_IP" ]]; then
