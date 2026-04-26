@@ -12,7 +12,6 @@ import tempfile
 import time
 from typing import Any
 
-
 DEFAULT_LIBRARY_PATH = Path(__file__).resolve().parent / "data" / "calibre-library"
 PREFERRED_SEND_FORMATS = ("EPUB", "AZW3", "MOBI", "PDF")
 
@@ -29,17 +28,21 @@ def _find_executable(name: str, macos_app_name: str | None = None) -> str:
     if sys.platform == "darwin" and macos_app_name is not None:
         candidates.append(f"/Applications/calibre.app/Contents/MacOS/{macos_app_name}")
     elif sys.platform.startswith("linux"):
-        candidates.extend([
-            f"/usr/bin/{name}",
-            f"/opt/calibre/{name}",
-            f"/usr/local/bin/{name}",
-        ])
+        candidates.extend(
+            [
+                f"/usr/bin/{name}",
+                f"/opt/calibre/{name}",
+                f"/usr/local/bin/{name}",
+            ]
+        )
 
     for candidate in candidates:
         if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
             return candidate
 
-    raise CalibreLibraryError(f"{name} not found. Install Calibre or ensure it's on PATH.")
+    raise CalibreLibraryError(
+        f"{name} not found. Install Calibre or ensure it's on PATH."
+    )
 
 
 CALIBREDB_EXECUTABLE = _find_executable("calibredb", "calibredb")
@@ -73,21 +76,23 @@ def list_library_books(query: str | None = None) -> list[dict[str, Any]]:
         str(library_path),
         "--for-machine",
         "--fields",
-        ",".join([
-            "id",
-            "title",
-            "authors",
-            "author_sort",
-            "publisher",
-            "pubdate",
-            "series",
-            "series_index",
-            "tags",
-            "languages",
-            "identifiers",
-            "formats",
-            "comments",
-        ]),
+        ",".join(
+            [
+                "id",
+                "title",
+                "authors",
+                "author_sort",
+                "publisher",
+                "pubdate",
+                "series",
+                "series_index",
+                "tags",
+                "languages",
+                "identifiers",
+                "formats",
+                "comments",
+            ]
+        ),
         "--sort-by",
         "title",
         "--ascending",
@@ -114,7 +119,9 @@ def library_book_cover_path(book_id: int) -> Path | None:
             (book_id,),
         ).fetchone()
     if row is None:
-        raise CalibreLibraryError(f"Book {book_id} was not found in the Calibre library")
+        raise CalibreLibraryError(
+            f"Book {book_id} was not found in the Calibre library"
+        )
 
     book_path, has_cover = row
     if not has_cover or not isinstance(book_path, str) or not book_path:
@@ -130,7 +137,9 @@ def library_book_cover_path(book_id: int) -> Path | None:
     return None
 
 
-def export_library_book(book_id: int, requested_format: str | None = None) -> dict[str, Any]:
+def export_library_book(
+    book_id: int, requested_format: str | None = None
+) -> dict[str, Any]:
     book = get_library_book(book_id)
     selected_format = choose_format(book, requested_format)
 
@@ -157,7 +166,9 @@ def export_library_book(book_id: int, requested_format: str | None = None) -> di
             if path.is_file() and path.suffix.lower() == f".{selected_format.lower()}"
         ]
         if not exported_files:
-            raise CalibreLibraryError(f"Calibre did not export a {selected_format} file")
+            raise CalibreLibraryError(
+                f"Calibre did not export a {selected_format} file"
+            )
 
         persistent = tempfile.NamedTemporaryFile(
             prefix="ideahacks_library_book_",
@@ -325,9 +336,7 @@ def duplicate_matches_for_added_books(
         return []
 
     books_by_id = {
-        book["id"]: book
-        for book in books
-        if isinstance(book.get("id"), int)
+        book["id"]: book for book in books if isinstance(book.get("id"), int)
     }
     added_id_set = set(added_ids)
     existing_books = [
@@ -347,11 +356,13 @@ def duplicate_matches_for_added_books(
             if books_match_as_duplicates(added_book, existing)
         ]
         if matches:
-            duplicates.append({
-                "added_id": added_id,
-                "added_book": added_book,
-                "existing_books": matches,
-            })
+            duplicates.append(
+                {
+                    "added_id": added_id,
+                    "added_book": added_book,
+                    "existing_books": matches,
+                }
+            )
     return duplicates
 
 
@@ -369,7 +380,11 @@ def books_match_as_duplicates(
 
     incoming_languages = normalized_languages(incoming)
     existing_languages = normalized_languages(existing)
-    return not incoming_languages or not existing_languages or incoming_languages == existing_languages
+    return (
+        not incoming_languages
+        or not existing_languages
+        or incoming_languages == existing_languages
+    )
 
 
 def fuzzy_title(raw_title: Any) -> str:
@@ -430,6 +445,7 @@ def _run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
         check=False,
         capture_output=True,
         text=True,
+        env={},
     )
     elapsed = time.perf_counter() - started_at
     if result.returncode != 0:

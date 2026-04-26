@@ -117,7 +117,9 @@ def refresh_connected_e_reader() -> ConnectedEReader | None:
     )
 
     next_reader = (
-        ConnectedEReader(name=device["name"], books=decorate_device_books(device["books"]))
+        ConnectedEReader(
+            name=device["name"], books=decorate_device_books(device["books"])
+        )
         if device is not None
         else None
     )
@@ -193,10 +195,12 @@ def device_cover_token(book: dict[str, Any], index: int) -> str:
 
 
 def connected_e_reader_message() -> str:
-    return json.dumps({
-        "type": "device_state",
-        "connected_e_reader": serialize_connected_e_reader(),
-    })
+    return json.dumps(
+        {
+            "type": "device_state",
+            "connected_e_reader": serialize_connected_e_reader(),
+        }
+    )
 
 
 def broadcast_stream_message(payload: dict[str, Any]) -> None:
@@ -218,17 +222,21 @@ def broadcast_stream_message(payload: dict[str, Any]) -> None:
 
 
 def broadcast_connected_e_reader() -> None:
-    broadcast_stream_message({
-        "type": "device_state",
-        "connected_e_reader": serialize_connected_e_reader(),
-    })
+    broadcast_stream_message(
+        {
+            "type": "device_state",
+            "connected_e_reader": serialize_connected_e_reader(),
+        }
+    )
 
 
 def broadcast_device_refresh_started() -> None:
-    broadcast_stream_message({
-        "type": "device_refresh",
-        "status": "loading",
-    })
+    broadcast_stream_message(
+        {
+            "type": "device_refresh",
+            "status": "loading",
+        }
+    )
 
 
 def start_libusb_event_loop() -> None:
@@ -512,7 +520,9 @@ def normalize_author_list(book: dict[str, Any]) -> str:
     return normalize_match_text(book.get("authors_display"))
 
 
-def request_int_list(payload: dict[str, Any], plural_key: str, singular_key: str) -> list[int]:
+def request_int_list(
+    payload: dict[str, Any], plural_key: str, singular_key: str
+) -> list[int]:
     raw_items = payload.get(plural_key)
     if raw_items is None and singular_key in payload:
         raw_items = [payload[singular_key]]
@@ -524,10 +534,12 @@ def request_int_list(payload: dict[str, Any], plural_key: str, singular_key: str
 def request_device_imports(payload: dict[str, Any]) -> list[dict[str, Any]]:
     raw_items = payload.get("books")
     if raw_items is None and "device_path" in payload:
-        raw_items = [{
-            "device_path": payload.get("device_path"),
-            "metadata": payload.get("metadata"),
-        }]
+        raw_items = [
+            {
+                "device_path": payload.get("device_path"),
+                "metadata": payload.get("metadata"),
+            }
+        ]
     if not isinstance(raw_items, list) or not raw_items:
         raise ValueError("books is required")
 
@@ -539,10 +551,12 @@ def request_device_imports(payload: dict[str, Any]) -> list[dict[str, Any]]:
         if not isinstance(device_path, str) or not device_path:
             raise ValueError("each book needs a device_path")
         metadata = item.get("metadata")
-        imports.append({
-            "device_path": device_path,
-            "metadata": metadata if isinstance(metadata, dict) else {},
-        })
+        imports.append(
+            {
+                "device_path": device_path,
+                "metadata": metadata if isinstance(metadata, dict) else {},
+            }
+        )
     return imports
 
 
@@ -550,7 +564,9 @@ def request_device_imports(payload: dict[str, Any]) -> list[dict[str, Any]]:
 def api_device():
     refresh = request.args.get("refresh") != "false"
     reader = refresh_connected_e_reader() if refresh else current_connected_e_reader()
-    return jsonify({"connected_e_reader": asdict(reader) if reader is not None else None})
+    return jsonify(
+        {"connected_e_reader": asdict(reader) if reader is not None else None}
+    )
 
 
 @app.post("/api/library/import")
@@ -565,7 +581,9 @@ def api_import_to_library():
     try:
         for uploaded_file in uploaded_files:
             filename = secure_filename(uploaded_file.filename or "book")
-            with tempfile.TemporaryDirectory(prefix="ideahacks_library_upload_") as temp_dir:
+            with tempfile.TemporaryDirectory(
+                prefix="ideahacks_library_upload_"
+            ) as temp_dir:
                 temp_path = Path(temp_dir) / filename
                 temp_paths.append(temp_path)
                 uploaded_file.save(temp_path)
@@ -581,13 +599,15 @@ def api_import_to_library():
             temp_path.unlink(missing_ok=True)
         return api_error(str(exc), 500)
 
-    return jsonify({
-        "ok": True,
-        "added_ids": added_ids,
-        "duplicates": duplicates,
-        "library": library_status(),
-        "books": books,
-    })
+    return jsonify(
+        {
+            "ok": True,
+            "added_ids": added_ids,
+            "duplicates": duplicates,
+            "library": library_status(),
+            "books": books,
+        }
+    )
 
 
 @app.post("/api/library/delete")
@@ -651,11 +671,13 @@ def api_send_to_device():
                         stage=f"Sending {index}/{total} to reader",
                         progress=0.45 + ((index - 1) / total) * 0.35,
                     )
-                    transfers.append(send_book_to_device(
-                        exported["path"],
-                        exported["filename"],
-                        exported["book"],
-                    ))
+                    transfers.append(
+                        send_book_to_device(
+                            exported["path"],
+                            exported["filename"],
+                            exported["book"],
+                        )
+                    )
             update_transfer_job(job, stage="Refreshing reader", progress=0.85)
             reader = refresh_connected_e_reader()
         finally:
@@ -772,10 +794,14 @@ def stream(ws) -> None:
             with transfer_jobs_lock:
                 jobs = list(transfer_jobs.values())
             for job in jobs:
-                ws.send(json.dumps({
-                    "type": "transfer_job",
-                    "job": serialize_transfer_job(job),
-                }))
+                ws.send(
+                    json.dumps(
+                        {
+                            "type": "transfer_job",
+                            "job": serialize_transfer_job(job),
+                        }
+                    )
+                )
         except Exception:
             return
         while True:

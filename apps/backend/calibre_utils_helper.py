@@ -339,11 +339,11 @@ def get_device_booklists(device, required_on_card=None):
                 location = (
                     "main memory"
                     if oncard is None
-                    else "storage card A"
-                    if oncard == "carda"
-                    else "storage card B"
+                    else "storage card A" if oncard == "carda" else "storage card B"
                 )
-                raise RuntimeError(f"Could not read device book list for {location}: {exc}") from exc
+                raise RuntimeError(
+                    f"Could not read device book list for {location}: {exc}"
+                ) from exc
             booklists.append(None)
     return tuple(booklists)
 
@@ -368,7 +368,11 @@ def metadata_to_calibre_metadata(raw: dict[str, Any]) -> Metadata:
     title = str(raw.get("title") or "Untitled")
     authors = raw.get("authors") or raw.get("authors_display") or [_localize("Unknown")]
     if isinstance(authors, str):
-        authors = [part.strip() for part in authors.replace("&", ",").split(",") if part.strip()]
+        authors = [
+            part.strip()
+            for part in authors.replace("&", ",").split(",")
+            if part.strip()
+        ]
     mi = Metadata(title, authors)
 
     for attr in ("publisher", "series", "comments", "author_sort", "title_sort"):
@@ -432,7 +436,9 @@ def cleanup_macos_sidecars(locations) -> None:
 def find_device_roots(path: Path) -> set[Path]:
     roots = set()
     for parent in path.parents:
-        if (parent / "metadata.calibre").exists() or (parent / "driveinfo.calibre").exists():
+        if (parent / "metadata.calibre").exists() or (
+            parent / "driveinfo.calibre"
+        ).exists():
             roots.add(parent)
         if parent.parent == parent:
             break

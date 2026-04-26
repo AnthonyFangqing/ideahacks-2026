@@ -22,11 +22,13 @@ def _find_calibre_debug() -> str:
     if sys.platform == "darwin":
         candidates.append("/Applications/calibre.app/Contents/MacOS/calibre-debug")
     elif sys.platform.startswith("linux"):
-        candidates.extend([
-            "/usr/bin/calibre-debug",
-            "/opt/calibre/calibre-debug",
-            "/usr/local/bin/calibre-debug",
-        ])
+        candidates.extend(
+            [
+                "/usr/bin/calibre-debug",
+                "/opt/calibre/calibre-debug",
+                "/usr/local/bin/calibre-debug",
+            ]
+        )
 
     for candidate in candidates:
         if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
@@ -197,7 +199,9 @@ def get_device_book_cover(device_path: str) -> dict[str, Any] | None:
     return {"data": base64.b64decode(data), "media_type": media_type}
 
 
-def _run_helper(operation: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+def _run_helper(
+    operation: str, payload: dict[str, Any] | None = None
+) -> dict[str, Any]:
     request = {"operation": operation, "payload": payload or {}}
     started_at = time.perf_counter()
     try:
@@ -206,8 +210,7 @@ def _run_helper(operation: str, payload: dict[str, Any] | None = None) -> dict[s
         ) as helper:
             helper.write(HELPER_SCRIPT)
             helper.flush()
-            env = os.environ.copy()
-            env["BOOKSHELF_HELPER_REQUEST"] = json.dumps(request)
+            env = {"BOOKSHELF_HELPER_REQUEST": json.dumps(request)}
             result = subprocess.run(
                 [CALIBRE_DEBUG_EXECUTABLE, "-e", helper.name],
                 check=False,
@@ -232,9 +235,7 @@ def _run_helper(operation: str, payload: dict[str, Any] | None = None) -> dict[s
         detail = (result.stderr or result.stdout).strip()
         if result.returncode == 0:
             detail = detail or "Calibre helper produced no JSON payload"
-        raise CalibreHelperError(
-            f"{operation} failed after {elapsed:.2f}s: {detail}"
-        )
+        raise CalibreHelperError(f"{operation} failed after {elapsed:.2f}s: {detail}")
 
     try:
         decoded = json.loads(payload)

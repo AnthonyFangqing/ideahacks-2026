@@ -1,8 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
-import topClipPath from "./assets/top-clip-path.svg";
-import woodTexture from "./assets/wood.png";
-import topBoardTexture from "./assets/woodtop.png";
 
 type Book = {
 	title?: string;
@@ -535,24 +532,17 @@ function App() {
 	});
 
 	return (
-		<main
-			className={`pibrary-kiosk ${mode}`}
-			style={{ "--wood-texture": `url(${woodTexture})` } as React.CSSProperties}
-		>
+		<main className={`pibrary-kiosk ${mode}`}>
 			<div className="wood-wash" />
 			<section className="idle-clock" aria-label="Current time">
-				<p>pibrary <em>β</em></p>
+				<p>
+					pibrary <em>β</em>
+				</p>
 				<time dateTime={currentTime.toISOString()}>{timeLabel}</time>
 			</section>
 
 			<section
 				className={`reader-board ${deviceLoading ? "loading" : ""}`}
-				style={
-					{
-						"--top-board": `url(${topBoardTexture})`,
-						"--top-clip": `url(${topClipPath})`,
-					} as React.CSSProperties
-				}
 				aria-label="Connected e-reader"
 			>
 				{deviceLoading && !reader ? (
