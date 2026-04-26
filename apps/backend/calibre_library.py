@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -99,6 +100,34 @@ def list_library_books(query: str | None = None) -> list[dict[str, Any]]:
         raise CalibreLibraryError("calibredb returned an unexpected book list")
 
     return [normalize_library_book(book) for book in decoded if isinstance(book, dict)]
+
+
+def library_book_cover_path(book_id: int) -> Path | None:
+    library_path = configured_library_path()
+    metadata_db = library_path / "metadata.db"
+    if not metadata_db.exists():
+        return None
+
+    with sqlite3.connect(metadata_db) as connection:
+        row = connection.execute(
+            "SELECT path, has_cover FROM books WHERE id = ?",
+            (book_id,),
+        ).fetchone()
+    if row is None:
+        raise CalibreLibraryError(f"Book {book_id} was not found in the Calibre library")
+
+    book_path, has_cover = row
+    if not has_cover or not isinstance(book_path, str) or not book_path:
+        return None
+
+    cover_path = library_path / book_path / "cover.jpg"
+    try:
+        cover_path.resolve().relative_to(library_path.resolve())
+    except ValueError:
+        return None
+    if cover_path.is_file():
+        return cover_path
+    return None
 
 
 def export_library_book(book_id: int, requested_format: str | None = None) -> dict[str, Any]:

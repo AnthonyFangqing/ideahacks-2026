@@ -359,6 +359,39 @@ button.danger {
 	border-radius: 22px;
 }
 
+.cover-frame {
+	width: 100%;
+	aspect-ratio: 2 / 3;
+	margin-bottom: 14px;
+	overflow: hidden;
+	border: 1px solid rgba(69, 44, 22, 0.12);
+	border-radius: 8px;
+	background: #f7efe1;
+	box-shadow: 0 12px 28px rgba(69, 44, 22, 0.12);
+}
+
+.cover-frame img,
+.cover-placeholder {
+	display: block;
+	width: 100%;
+	height: 100%;
+	object-fit: cover;
+}
+
+.cover-placeholder {
+	background:
+		linear-gradient(
+			180deg,
+			rgba(255, 250, 241, 0.96),
+			rgba(247, 239, 225, 0.96)
+		),
+		repeating-linear-gradient(
+			0deg,
+			transparent 0 34px,
+			rgba(69, 44, 22, 0.08) 34px 38px
+		);
+}
+
 .book-card h3 {
 	overflow-wrap: anywhere;
 }
@@ -389,7 +422,7 @@ button.danger {
 }
 
 .book-index {
-	margin-bottom: 24px;
+	margin-bottom: 12px;
 	color: var(--accent);
 }
 

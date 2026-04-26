@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import atexit
 from dataclasses import asdict, dataclass, field
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -11,7 +12,7 @@ import time
 from typing import Any
 import uuid
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, Response, jsonify, request, send_file, send_from_directory
 from flask_sock import Sock
 import usb1
 from werkzeug.utils import secure_filename
@@ -20,6 +21,7 @@ from calibre_library import (
     CalibreLibraryError,
     export_library_book,
     import_file_to_library,
+    library_book_cover_path,
     library_status,
     list_library_books,
 )
@@ -27,6 +29,7 @@ from calibre_utils import (
     CalibreHelperError,
     delete_book_from_device,
     get_attached_device,
+    get_device_book_cover,
     import_book_from_device,
     send_book_to_device,
 )
@@ -67,6 +70,9 @@ libusb_thread: threading.Thread | None = None
 device_operation_lock = threading.Lock()
 transfer_jobs: dict[str, TransferJob] = {}
 transfer_jobs_lock = threading.Lock()
+device_cover_sources: dict[str, dict[str, Any]] = {}
+device_cover_cache: dict[str, tuple[bytes, str]] = {}
+device_cover_lock = threading.Lock()
 
 
 app = Flask(__name__, static_folder=None)
@@ -111,10 +117,13 @@ def refresh_connected_e_reader() -> ConnectedEReader | None:
     )
 
     next_reader = (
-        ConnectedEReader(name=device["name"], books=device["books"])
+        ConnectedEReader(name=device["name"], books=decorate_device_books(device["books"]))
         if device is not None
         else None
     )
+    if next_reader is None:
+        with device_cover_lock:
+            device_cover_sources.clear()
     with connected_e_reader_lock:
         previous_reader = connected_e_reader
         connected_e_reader = next_reader
@@ -133,6 +142,54 @@ def serialize_connected_e_reader() -> dict[str, Any] | None:
     if reader is None:
         return None
     return asdict(reader)
+
+
+def decorate_library_books(books: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    decorated = []
+    for book in books:
+        next_book = dict(book)
+        book_id = next_book.get("id")
+        if isinstance(book_id, int):
+            next_book["cover_url"] = f"/api/library/books/{book_id}/cover"
+        decorated.append(next_book)
+    return decorated
+
+
+def decorate_device_books(books: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    decorated = []
+    next_sources: dict[str, dict[str, Any]] = {}
+    for index, book in enumerate(books):
+        next_book = dict(book)
+        token = device_cover_token(next_book, index)
+        next_book["cover_token"] = token
+        next_book["cover_url"] = f"/api/device/books/{token}/cover"
+        next_sources[token] = next_book
+        decorated.append(next_book)
+
+    with device_cover_lock:
+        device_cover_sources.clear()
+        device_cover_sources.update(next_sources)
+    return decorated
+
+
+def device_cover_token(book: dict[str, Any], index: int) -> str:
+    identifiers = book.get("identifiers")
+    identifier_key = (
+        json.dumps(identifiers, sort_keys=True)
+        if isinstance(identifiers, dict) and identifiers
+        else None
+    )
+    raw_key = (
+        book.get("path")
+        or book.get("lpath")
+        or identifier_key
+        or "|".join(
+            str(book.get(key) or "")
+            for key in ("title", "authors_display", "publisher", "pubdate")
+        )
+        or str(index)
+    )
+    return hashlib.sha256(str(raw_key).encode("utf-8")).hexdigest()[:24]
 
 
 def connected_e_reader_message() -> str:
@@ -318,7 +375,7 @@ def api_transfer_job(job_id: str):
 def api_library():
     query = request.args.get("query") or None
     try:
-        books = list_library_books(query)
+        books = decorate_library_books(list_library_books(query))
     except CalibreLibraryError as exc:
         return api_error(str(exc), 500)
     return jsonify({"library": library_status(), "books": books})
@@ -327,6 +384,124 @@ def api_library():
 @app.get("/api/library/status")
 def api_library_status():
     return jsonify({"library": library_status()})
+
+
+@app.get("/api/library/books/<int:book_id>/cover")
+def api_library_book_cover(book_id: int):
+    try:
+        cover_path = library_book_cover_path(book_id)
+    except CalibreLibraryError:
+        cover_path = None
+
+    if cover_path is None:
+        return placeholder_cover_response()
+    return send_file(
+        cover_path,
+        mimetype="image/jpeg",
+        conditional=True,
+        max_age=3600,
+    )
+
+
+@app.get("/api/device/books/<cover_token>/cover")
+def api_device_book_cover(cover_token: str):
+    with device_cover_lock:
+        cached = device_cover_cache.get(cover_token)
+        source = device_cover_sources.get(cover_token)
+    if cached is not None:
+        data, media_type = cached
+        return cover_bytes_response(data, media_type)
+    if source is None:
+        return placeholder_cover_response()
+
+    if matched_cover_path := find_matching_library_cover(source):
+        return send_file(
+            matched_cover_path,
+            mimetype="image/jpeg",
+            conditional=True,
+            max_age=3600,
+        )
+
+    device_path = source.get("path") or source.get("lpath")
+    if isinstance(device_path, str) and device_path:
+        try:
+            with device_operation_lock:
+                cover = get_device_book_cover(device_path)
+        except CalibreHelperError as exc:
+            app.logger.info("device cover lookup failed for %s: %s", device_path, exc)
+            cover = None
+        if cover is not None:
+            data = cover["data"]
+            media_type = cover["media_type"]
+            with device_cover_lock:
+                device_cover_cache[cover_token] = (data, media_type)
+            return cover_bytes_response(data, media_type)
+
+    return placeholder_cover_response()
+
+
+def cover_bytes_response(data: bytes, media_type: str) -> Response:
+    response = Response(data, mimetype=media_type)
+    response.headers["Cache-Control"] = "public, max-age=3600"
+    response.headers["ETag"] = hashlib.sha256(data).hexdigest()
+    return response
+
+
+def placeholder_cover_response() -> Response:
+    svg = """<svg xmlns="http://www.w3.org/2000/svg" width="240" height="360" viewBox="0 0 240 360">
+<rect width="240" height="360" rx="14" fill="#f7efe1"/>
+<rect x="26" y="28" width="188" height="304" rx="8" fill="#fffaf1" stroke="#d9c9ad" stroke-width="2"/>
+<path d="M68 118h104M68 146h104M68 174h74" stroke="#8f6f49" stroke-width="10" stroke-linecap="round"/>
+<path d="M72 245h96M72 273h64" stroke="#d9c9ad" stroke-width="8" stroke-linecap="round"/>
+</svg>"""
+    response = Response(svg, mimetype="image/svg+xml")
+    response.headers["Cache-Control"] = "public, max-age=86400"
+    return response
+
+
+def find_matching_library_cover(device_book: dict[str, Any]) -> Path | None:
+    try:
+        library_books = list_library_books()
+    except CalibreLibraryError:
+        return None
+
+    for library_book in library_books:
+        if books_match(device_book, library_book):
+            book_id = library_book.get("id")
+            if isinstance(book_id, int):
+                try:
+                    if cover_path := library_book_cover_path(book_id):
+                        return cover_path
+                except CalibreLibraryError:
+                    continue
+    return None
+
+
+def books_match(device_book: dict[str, Any], library_book: dict[str, Any]) -> bool:
+    device_identifiers = device_book.get("identifiers")
+    library_identifiers = library_book.get("identifiers")
+    if isinstance(device_identifiers, dict) and isinstance(library_identifiers, dict):
+        for key, value in device_identifiers.items():
+            if value and library_identifiers.get(key) == value:
+                return True
+
+    return (
+        bool(normalize_match_text(device_book.get("title")))
+        and normalize_match_text(device_book.get("title"))
+        == normalize_match_text(library_book.get("title"))
+        and normalize_author_list(device_book) == normalize_author_list(library_book)
+    )
+
+
+def normalize_match_text(value: Any) -> str:
+    return " ".join(str(value or "").casefold().split())
+
+
+def normalize_author_list(book: dict[str, Any]) -> str:
+    authors = book.get("authors")
+    if isinstance(authors, list):
+        return " & ".join(normalize_match_text(author) for author in authors)
+    return normalize_match_text(book.get("authors_display"))
 
 
 def request_int_list(payload: dict[str, Any], plural_key: str, singular_key: str) -> list[int]:
@@ -410,7 +585,7 @@ def api_import_to_library():
                         delete_after_import=True,
                     )
                 )
-        books = list_library_books()
+        books = decorate_library_books(list_library_books())
     except CalibreLibraryError as exc:
         for temp_path in temp_paths:
             temp_path.unlink(missing_ok=True)
@@ -537,7 +712,7 @@ def api_import_from_device():
                         )
                         deleted.append(delete_book_from_device(device_path))
                 update_transfer_job(job, stage="Refreshing library", progress=0.85)
-                books = list_library_books()
+                books = decorate_library_books(list_library_books())
             reader = (
                 refresh_connected_e_reader()
                 if delete_after_import

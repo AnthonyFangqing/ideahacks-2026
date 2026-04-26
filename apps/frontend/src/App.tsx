@@ -16,6 +16,8 @@ type Book = {
 	lpath?: string | null;
 	size?: number | null;
 	mime?: string | null;
+	cover_url?: string | null;
+	cover_token?: string | null;
 };
 
 type LibraryBook = Book & {
@@ -119,6 +121,13 @@ const getBookKey = (book: Book, fallback: string | number) =>
 		.join("|");
 
 const getDevicePath = (book: Book) => book.path ?? book.lpath ?? null;
+
+const getCoverUrl = (book: Book, apiBaseUrl: string) => {
+	if (!book.cover_url) {
+		return null;
+	}
+	return new URL(book.cover_url, apiBaseUrl).toString();
+};
 
 const formatBookAuthors = (book: Book) => {
 	if (book.authors_display) {
@@ -883,6 +892,7 @@ function App() {
 									book={book}
 									index={index}
 									selected={selectedDeviceBookKeys.has(getBookKey(book, index))}
+									apiBaseUrl={apiBaseUrl}
 									transferState={transferState}
 									onToggle={() => toggleDeviceBook(book, index)}
 									onImport={(bookToImport, deleteAfterImport) =>
@@ -944,7 +954,11 @@ function App() {
 										/>
 										<span>Select</span>
 									</label>
-									<BookCardContent book={book} index={index} />
+									<BookCardContent
+										book={book}
+										index={index}
+										apiBaseUrl={apiBaseUrl}
+									/>
 									<div className="formats">
 										{book.formats.length
 											? book.formats.map((format) => (
@@ -989,6 +1003,7 @@ function DeviceBookCard({
 	book,
 	index,
 	selected,
+	apiBaseUrl,
 	transferState,
 	onToggle,
 	onImport,
@@ -997,6 +1012,7 @@ function DeviceBookCard({
 	book: Book;
 	index: number;
 	selected: boolean;
+	apiBaseUrl: string;
 	transferState: TransferState;
 	onToggle: () => void;
 	onImport: (book: Book, deleteAfterImport: boolean) => void;
@@ -1021,7 +1037,7 @@ function DeviceBookCard({
 				<input type="checkbox" checked={selected} onChange={onToggle} />
 				<span>Select</span>
 			</label>
-			<BookCardContent book={book} index={index} />
+			<BookCardContent book={book} index={index} apiBaseUrl={apiBaseUrl} />
 			<div className="card-actions">
 				<button
 					type="button"
@@ -1051,11 +1067,27 @@ function DeviceBookCard({
 	);
 }
 
-function BookCardContent({ book, index }: { book: Book; index: number }) {
+function BookCardContent({
+	book,
+	index,
+	apiBaseUrl,
+}: {
+	book: Book;
+	index: number;
+	apiBaseUrl: string;
+}) {
 	const size = formatSize(book.size);
+	const coverUrl = getCoverUrl(book, apiBaseUrl);
 
 	return (
 		<>
+			<div className="cover-frame">
+				{coverUrl ? (
+					<img src={coverUrl} alt="" loading="lazy" />
+				) : (
+					<div className="cover-placeholder" />
+				)}
+			</div>
 			<p className="book-index">{String(index + 1).padStart(2, "0")}</p>
 			<h3>{book.title || "Untitled book"}</h3>
 			<p className="author">{formatBookAuthors(book)}</p>

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import shutil
@@ -118,6 +119,22 @@ def delete_book_from_device(device_path: str) -> dict[str, Any]:
     if not isinstance(deleted, dict):
         raise CalibreHelperError("Calibre helper returned an invalid delete result")
     return deleted
+
+
+def get_device_book_cover(device_path: str) -> dict[str, Any] | None:
+    """Return thumbnail bytes for a device book, if the driver exposes one."""
+
+    decoded = _run_helper("cover_from_device", {"device_path": device_path})
+    cover = decoded.get("cover")
+    if cover is None:
+        return None
+    if not isinstance(cover, dict):
+        raise CalibreHelperError("Calibre helper returned an invalid cover result")
+    data = cover.get("data")
+    media_type = cover.get("media_type")
+    if not isinstance(data, str) or not isinstance(media_type, str):
+        raise CalibreHelperError("Calibre helper returned an invalid cover payload")
+    return {"data": base64.b64decode(data), "media_type": media_type}
 
 
 def _run_helper(operation: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:

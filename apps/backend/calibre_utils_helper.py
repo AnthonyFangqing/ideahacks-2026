@@ -7,11 +7,14 @@ from calibre.ebooks.metadata.book.base import Metadata
 from calibre.utils.config import device_prefs
 from calibre.utils.date import isoformat
 from calibre.utils.localization import _ as _localize
+import base64
 import contextlib
 import json
+import mimetypes
 import os
 from pathlib import Path
 import sys
+import tempfile
 import traceback
 from typing import Any
 
@@ -35,6 +38,8 @@ def main() -> int:
                 result = {"imported": import_from_device(payload)}
             elif operation == "delete_from_device":
                 result = {"deleted": delete_from_device(payload)}
+            elif operation == "cover_from_device":
+                result = {"cover": cover_from_device(payload)}
             else:
                 raise ValueError(f"Unknown helper operation: {operation}")
     except Exception as exc:
@@ -201,6 +206,122 @@ def delete_from_device(payload: dict[str, Any]) -> dict[str, Any]:
     finally:
         close_device(opened_device)
         shutdown_plugins(device_plugins)
+
+
+def cover_from_device(payload: dict[str, Any]) -> dict[str, str] | None:
+    device_path = require_string(payload, "device_path")
+
+    opened_device = None
+    try:
+        opened_device = open_connected_device()
+        if opened_device is None:
+            raise RuntimeError("No e-reader is attached")
+
+        book = find_device_book(opened_device, device_path)
+        if book is None:
+            return None
+        if cover := serialize_thumbnail(getattr(book, "thumbnail", None)):
+            return cover
+        return extract_cover_from_device_book(opened_device, device_path)
+    finally:
+        close_device(opened_device)
+        shutdown_plugins(device_plugins)
+
+
+def extract_cover_from_device_book(device, device_path: str) -> dict[str, str] | None:
+    suffix = Path(device_path).suffix or ".book"
+    temp_file = tempfile.NamedTemporaryFile(
+        prefix="bookshelf_device_cover_",
+        suffix=suffix,
+        delete=False,
+    )
+    temp_file.close()
+    temp_path = Path(temp_file.name)
+    try:
+        with open(temp_path, "wb") as outfile:
+            device.get_file(device_path, outfile, end_session=False)
+        stream_type = temp_path.suffix.removeprefix(".")
+        with open(temp_path, "rb") as stream:
+            try:
+                from calibre.ebooks.metadata.meta import get_metadata
+
+                metadata = get_metadata(
+                    stream,
+                    stream_type=stream_type,
+                    force_read_metadata=True,
+                )
+            except Exception:
+                traceback.print_exc()
+                return None
+        return serialize_cover_data(getattr(metadata, "cover_data", None))
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def serialize_cover_data(cover_data) -> dict[str, str] | None:
+    if not cover_data or len(cover_data) < 2:
+        return None
+    fmt, data = cover_data[0], cover_data[1]
+    if not data:
+        return None
+    if isinstance(data, str):
+        data = data.encode("utf-8")
+    return {
+        "data": base64.b64encode(data).decode("ascii"),
+        "media_type": media_type_from_format(fmt, data),
+    }
+
+
+def serialize_thumbnail(thumbnail) -> dict[str, str] | None:
+    if not thumbnail:
+        return None
+
+    data = None
+    media_type = None
+    image_path = getattr(thumbnail, "image_path", None)
+    if image_path and os.path.isfile(image_path):
+        with open(image_path, "rb") as image:
+            data = image.read()
+        media_type = mimetypes.guess_type(image_path)[0]
+    elif isinstance(thumbnail, (tuple, list)) and len(thumbnail) >= 3:
+        data = thumbnail[2]
+    elif isinstance(thumbnail, bytes):
+        data = thumbnail
+
+    if not data:
+        return None
+    if media_type is None:
+        media_type = guess_image_media_type(data)
+
+    return {
+        "data": base64.b64encode(data).decode("ascii"),
+        "media_type": media_type,
+    }
+
+
+def guess_image_media_type(data: bytes) -> str:
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8"):
+        return "image/jpeg"
+    if data.startswith(b"GIF87a") or data.startswith(b"GIF89a"):
+        return "image/gif"
+    if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return "image/webp"
+    return "application/octet-stream"
+
+
+def media_type_from_format(fmt, data: bytes) -> str:
+    normalized = str(fmt or "").lower().removeprefix(".")
+    if normalized in {"jpg", "jpeg"}:
+        return "image/jpeg"
+    if normalized == "png":
+        return "image/png"
+    if normalized == "gif":
+        return "image/gif"
+    if normalized == "webp":
+        return "image/webp"
+    return guess_image_media_type(data)
 
 
 def get_device_booklists(device):
