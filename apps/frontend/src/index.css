@@ -1,42 +1,37 @@
-:root {
-	--bg: #f4ebd8;
-	--ink: #211810;
-	--text: #655646;
-	--muted: #8d7b66;
-	--line: rgba(77, 55, 34, 0.18);
-	--chip: rgba(88, 58, 28, 0.08);
-	--accent: #8e4c19;
-	--good: #338059;
-	--warning: #bf7b25;
-	--bad: #a3412d;
+* {
+	box-sizing: border-box;
+}
 
+:root {
+	--serif: "EB Garamond", Garamond, Georgia, serif;
 	--sans: Avenir Next, Avenir, Montserrat, Verdana, sans-serif;
-	--mono: ui-monospace, Consolas, monospace;
+	--kiosk-width: 1333px;
+	--kiosk-height: 800px;
 
 	font: 18px / 150% var(--sans);
-	color-scheme: light dark;
-	color: var(--text);
-	background: var(--bg);
+	color: #050403;
+	background: #d8a76f;
 	font-synthesis: none;
 	text-rendering: optimizeLegibility;
 	-webkit-font-smoothing: antialiased;
 	-moz-osx-font-smoothing: grayscale;
-
-	@media (max-width: 1024px) {
-		font-size: 16px;
-	}
 }
 
 #root {
-	min-height: 100svh;
+	width: var(--kiosk-width);
+	height: var(--kiosk-height);
+	overflow: hidden;
+	transform-origin: center;
 }
 
 body {
+	display: grid;
+	width: 100vw;
+	height: 100vh;
 	margin: 0;
-}
-
-* {
-	box-sizing: border-box;
+	place-items: center;
+	overflow: hidden;
+	overscroll-behavior: none;
 }
 
 button,
@@ -44,8 +39,4 @@ input,
 textarea,
 select {
 	font: inherit;
-}
-
-code {
-	font-family: var(--mono);
 }

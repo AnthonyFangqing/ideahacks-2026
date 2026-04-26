@@ -224,6 +224,13 @@ def broadcast_connected_e_reader() -> None:
     })
 
 
+def broadcast_device_refresh_started() -> None:
+    broadcast_stream_message({
+        "type": "device_refresh",
+        "status": "loading",
+    })
+
+
 def start_libusb_event_loop() -> None:
     global libusb_thread
 
@@ -269,6 +276,7 @@ def libusb_event_loop() -> None:
 
         def on_libusb_event(_context, _device, _event) -> bool:
             app.logger.info(f"libusb event from device {_device}")
+            broadcast_device_refresh_started()
             refresh_connected_e_reader()
             return False
 
