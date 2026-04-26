@@ -1,1 +1,23 @@
+staged_files="$(mktemp)"
+biome_files="$(mktemp)"
+
+trap 'rm -f "$staged_files" "$biome_files"' EXIT
+
+git diff --cached --name-only --diff-filter=ACMR > "$staged_files"
+
+while IFS= read -r file; do
+	case "$file" in
+		*.js|*.jsx|*.ts|*.tsx|*.json|*.jsonc|*.css|*.graphql|*.gql)
+			printf "%s\n" "$file" >> "$biome_files"
+			;;
+	esac
+done < "$staged_files"
+
+if [ -s "$biome_files" ]; then
+	pnpm exec biome check --write --staged .
+	while IFS= read -r file; do
+		git add -- "$file"
+	done < "$staged_files"
+fi
+
 pnpm lint && pnpm test
