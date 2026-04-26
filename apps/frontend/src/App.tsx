@@ -74,6 +74,7 @@ type TransferState = {
 	jobId: string | null;
 	stage: string | null;
 	progress: number | null;
+	displayProgress: number | null;
 	message: string | null;
 	error: string | null;
 	lastKey: string | null;
@@ -190,11 +191,18 @@ function App() {
 	const [libraryBooks, setLibraryBooks] = useState<LibraryBook[]>([]);
 	const [libraryQuery, setLibraryQuery] = useState("");
 	const [selectedLibraryFiles, setSelectedLibraryFiles] = useState<File[]>([]);
+	const [selectedLibraryBookIds, setSelectedLibraryBookIds] = useState<
+		Set<number>
+	>(() => new Set());
+	const [selectedDeviceBookKeys, setSelectedDeviceBookKeys] = useState<
+		Set<string>
+	>(() => new Set());
 	const [transferState, setTransferState] = useState<TransferState>({
 		busyKey: null,
 		jobId: null,
 		stage: null,
 		progress: null,
+		displayProgress: null,
 		message: null,
 		error: null,
 		lastKey: null,
@@ -244,6 +252,7 @@ function App() {
 					jobId: null,
 					stage: null,
 					progress: null,
+					displayProgress: null,
 					message: null,
 					error: error instanceof Error ? error.message : String(error),
 					lastKey: null,
@@ -257,6 +266,7 @@ function App() {
 			jobId: job.id,
 			stage: job.stage,
 			progress: job.progress,
+			displayProgress: job.progress,
 			message: null,
 			error: null,
 			lastKey: null,
@@ -427,6 +437,7 @@ function App() {
 			jobId: null,
 			stage: "Starting",
 			progress: 0,
+			displayProgress: 0,
 			message: null,
 			error: null,
 			lastKey: null,
@@ -438,6 +449,7 @@ function App() {
 				jobId: null,
 				stage: null,
 				progress: null,
+				displayProgress: null,
 				message,
 				error: null,
 				lastKey: busyKey,
@@ -448,6 +460,7 @@ function App() {
 				jobId: null,
 				stage: null,
 				progress: null,
+				displayProgress: null,
 				message: null,
 				error: error instanceof Error ? error.message : String(error),
 				lastKey: busyKey,
@@ -455,81 +468,130 @@ function App() {
 		}
 	};
 
-	const sendToReader = (book: LibraryBook) =>
-		runTransfer(`send-${book.id}`, async () => {
-			const response = await postJson<JobStartResponse<DeviceResponse>>(
-				`${apiBaseUrl}/api/device/send`,
-				{ book_id: book.id },
-			);
-			const result = await waitForJob(`send-${book.id}`, response.job);
-			setReader(result.connected_e_reader);
-			return `Sent "${book.title || "Untitled book"}" to the reader.`;
-		});
-
-	const importFromReader = (book: Book, deleteAfterImport: boolean) => {
-		const devicePath = getDevicePath(book);
-		if (!devicePath) {
+	const sendToReader = (selectedBooks: LibraryBook[]) => {
+		if (selectedBooks.length === 0) {
 			setTransferState({
 				busyKey: null,
 				jobId: null,
 				stage: null,
 				progress: null,
+				displayProgress: null,
 				message: null,
-				error: "This device book is missing a Calibre path.",
+				error: "Choose at least one library book first.",
 				lastKey: null,
 			});
 			return;
 		}
 
-		void runTransfer(`import-${devicePath}-${deleteAfterImport}`, async () => {
+		const busyKey = `send-${selectedBooks.map((book) => book.id).join("-")}`;
+		void runTransfer(busyKey, async () => {
+			const response = await postJson<JobStartResponse<DeviceResponse>>(
+				`${apiBaseUrl}/api/device/send`,
+				{ book_ids: selectedBooks.map((book) => book.id) },
+			);
+			const result = await waitForJob(busyKey, response.job);
+			setReader(result.connected_e_reader);
+			setSelectedLibraryBookIds(new Set());
+			return `Sent ${selectedBooks.length} book${
+				selectedBooks.length === 1 ? "" : "s"
+			} to the reader.`;
+		});
+	};
+
+	const importFromReader = (
+		selectedBooks: Book[],
+		deleteAfterImport: boolean,
+	) => {
+		const booksForImport = selectedBooks
+			.map((book, index) => ({
+				book,
+				key: getBookKey(book, index),
+				devicePath: getDevicePath(book),
+			}))
+			.filter((item): item is { book: Book; key: string; devicePath: string } =>
+				Boolean(item.devicePath),
+			);
+		if (booksForImport.length === 0) {
+			setTransferState({
+				busyKey: null,
+				jobId: null,
+				stage: null,
+				progress: null,
+				displayProgress: null,
+				message: null,
+				error: "Choose at least one device book with a Calibre path first.",
+				lastKey: null,
+			});
+			return;
+		}
+
+		const busyKey = `import-${booksForImport.map((item) => item.key).join("-")}-${deleteAfterImport}`;
+		void runTransfer(busyKey, async () => {
 			const response = await postJson<
 				JobStartResponse<{ books?: LibraryBook[] } & DeviceResponse>
 			>(`${apiBaseUrl}/api/device/import`, {
-				device_path: devicePath,
+				books: booksForImport.map((item) => ({
+					device_path: item.devicePath,
+					metadata: item.book,
+				})),
 				delete_after_import: deleteAfterImport,
-				metadata: book,
 			});
-			const result = await waitForJob(
-				`import-${devicePath}-${deleteAfterImport}`,
-				response.job,
-			);
+			const result = await waitForJob(busyKey, response.job);
 			setReader(result.connected_e_reader);
 			if (result.books) {
 				setLibraryBooks(result.books);
 			} else {
 				await loadLibrary();
 			}
+			setSelectedDeviceBookKeys(new Set());
 			return deleteAfterImport
-				? `Moved "${book.title || "Untitled book"}" into the kiosk library.`
-				: `Copied "${book.title || "Untitled book"}" into the kiosk library.`;
+				? `Moved ${booksForImport.length} book${
+						booksForImport.length === 1 ? "" : "s"
+					} into the kiosk library.`
+				: `Copied ${booksForImport.length} book${
+						booksForImport.length === 1 ? "" : "s"
+					} into the kiosk library.`;
 		});
 	};
 
-	const deleteFromReader = (book: Book) => {
-		const devicePath = getDevicePath(book);
-		if (!devicePath) {
+	const deleteFromReader = (selectedBooks: Book[]) => {
+		const booksForDelete = selectedBooks
+			.map((book, index) => ({
+				book,
+				key: getBookKey(book, index),
+				devicePath: getDevicePath(book),
+			}))
+			.filter((item): item is { book: Book; key: string; devicePath: string } =>
+				Boolean(item.devicePath),
+			);
+		if (booksForDelete.length === 0) {
 			setTransferState({
 				busyKey: null,
 				jobId: null,
 				stage: null,
 				progress: null,
+				displayProgress: null,
 				message: null,
-				error: "This device book is missing a Calibre path.",
+				error: "Choose at least one device book with a Calibre path first.",
 				lastKey: null,
 			});
 			return;
 		}
 
-		void runTransfer(`delete-${devicePath}`, async () => {
+		const busyKey = `delete-${booksForDelete.map((item) => item.key).join("-")}`;
+		void runTransfer(busyKey, async () => {
 			const response = await postJson<JobStartResponse<DeviceResponse>>(
 				`${apiBaseUrl}/api/device/delete`,
 				{
-					device_path: devicePath,
+					device_paths: booksForDelete.map((item) => item.devicePath),
 				},
 			);
-			const result = await waitForJob(`delete-${devicePath}`, response.job);
+			const result = await waitForJob(busyKey, response.job);
 			setReader(result.connected_e_reader);
-			return `Deleted "${book.title || "Untitled book"}" from the reader.`;
+			setSelectedDeviceBookKeys(new Set());
+			return `Deleted ${booksForDelete.length} book${
+				booksForDelete.length === 1 ? "" : "s"
+			} from the reader.`;
 		});
 	};
 
@@ -540,6 +602,7 @@ function App() {
 				jobId: null,
 				stage: null,
 				progress: null,
+				displayProgress: null,
 				message: null,
 				error: "Choose at least one book file first.",
 				lastKey: null,
@@ -568,6 +631,60 @@ function App() {
 	const books = reader?.books ?? [];
 	const featuredDeviceBooks = books.slice(0, 12);
 	const featuredLibraryBooks = libraryBooks.slice(0, 12);
+	const selectedDeviceBooks = featuredDeviceBooks.filter((book, index) =>
+		selectedDeviceBookKeys.has(getBookKey(book, index)),
+	);
+	const selectedLibraryBooks = featuredLibraryBooks.filter((book) =>
+		selectedLibraryBookIds.has(book.id),
+	);
+	const toggleDeviceBook = (book: Book, index: number) => {
+		const key = getBookKey(book, index);
+		setSelectedDeviceBookKeys((current) => {
+			const next = new Set(current);
+			if (next.has(key)) {
+				next.delete(key);
+			} else {
+				next.add(key);
+			}
+			return next;
+		});
+	};
+	const toggleLibraryBook = (bookId: number) => {
+		setSelectedLibraryBookIds((current) => {
+			const next = new Set(current);
+			if (next.has(bookId)) {
+				next.delete(bookId);
+			} else {
+				next.add(bookId);
+			}
+			return next;
+		});
+	};
+
+	useEffect(() => {
+		if (!transferState.busyKey || transferState.progress === null) {
+			return;
+		}
+
+		const timer = window.setInterval(() => {
+			setTransferState((current) => {
+				if (!current.busyKey || current.progress === null) {
+					return current;
+				}
+				const displayed = current.displayProgress ?? current.progress;
+				const ceiling = Math.min(0.97, current.progress + 0.08);
+				if (displayed >= ceiling) {
+					return current;
+				}
+				return {
+					...current,
+					displayProgress: Math.min(ceiling, displayed + 0.006),
+				};
+			});
+		}, 180);
+
+		return () => window.clearInterval(timer);
+	}, [transferState.busyKey, transferState.progress]);
 
 	return (
 		<main className="kiosk-shell">
@@ -601,10 +718,29 @@ function App() {
 
 			{transferState.busyKey && transferState.stage ? (
 				<section className="notice-panel">
-					{transferState.stage}
-					{typeof transferState.progress === "number"
-						? ` (${Math.round(transferState.progress * 100)}%)`
-						: ""}
+					<div className="progress-copy">
+						<span>{transferState.stage}</span>
+						{typeof transferState.progress === "number" ? (
+							<strong>{Math.round(transferState.progress * 100)}%</strong>
+						) : null}
+					</div>
+					{typeof transferState.displayProgress === "number" ? (
+						<div
+							className="progress-track"
+							aria-label="Transfer progress"
+							aria-valuemin={0}
+							aria-valuemax={100}
+							aria-valuenow={Math.round(transferState.progress ?? 0)}
+							role="progressbar"
+						>
+							<div
+								className="progress-fill"
+								style={{
+									width: `${Math.round(transferState.displayProgress * 100)}%`,
+								}}
+							/>
+						</div>
+					) : null}
 				</section>
 			) : null}
 
@@ -625,6 +761,7 @@ function App() {
 									jobId: null,
 									stage: null,
 									progress: null,
+									displayProgress: null,
 									message: null,
 									error: error instanceof Error ? error.message : String(error),
 									lastKey: null,
@@ -648,6 +785,7 @@ function App() {
 										jobId: null,
 										stage: null,
 										progress: null,
+										displayProgress: null,
 										message: null,
 										error:
 											error instanceof Error ? error.message : String(error),
@@ -708,6 +846,33 @@ function App() {
 								? `${books.length} book${books.length === 1 ? "" : "s"} reported by Calibre.`
 								: "Dock an e-reader to scan it and enable transfer actions."}
 						</p>
+						{featuredDeviceBooks.length > 0 ? (
+							<div className="selection-bar">
+								<strong>{selectedDeviceBooks.length} selected</strong>
+								<button
+									type="button"
+									disabled={transferState.busyKey !== null}
+									onClick={() => importFromReader(selectedDeviceBooks, false)}
+								>
+									Copy selected
+								</button>
+								<button
+									type="button"
+									disabled={transferState.busyKey !== null}
+									onClick={() => importFromReader(selectedDeviceBooks, true)}
+								>
+									Move selected
+								</button>
+								<button
+									type="button"
+									className="danger"
+									disabled={transferState.busyKey !== null}
+									onClick={() => deleteFromReader(selectedDeviceBooks)}
+								>
+									Delete selected
+								</button>
+							</div>
+						) : null}
 					</div>
 
 					{featuredDeviceBooks.length > 0 ? (
@@ -717,9 +882,13 @@ function App() {
 									key={getBookKey(book, index)}
 									book={book}
 									index={index}
+									selected={selectedDeviceBookKeys.has(getBookKey(book, index))}
 									transferState={transferState}
-									onImport={importFromReader}
-									onDelete={deleteFromReader}
+									onToggle={() => toggleDeviceBook(book, index)}
+									onImport={(bookToImport, deleteAfterImport) =>
+										importFromReader([bookToImport], deleteAfterImport)
+									}
+									onDelete={(bookToDelete) => deleteFromReader([bookToDelete])}
 								/>
 							))}
 						</ul>
@@ -740,6 +909,18 @@ function App() {
 								? "Books come from the configured Calibre library."
 								: "No Calibre metadata.db exists yet. Import a reader book or add books with Calibre to initialize it."}
 						</p>
+						{featuredLibraryBooks.length > 0 ? (
+							<div className="selection-bar">
+								<strong>{selectedLibraryBooks.length} selected</strong>
+								<button
+									type="button"
+									disabled={transferState.busyKey !== null || !reader}
+									onClick={() => sendToReader(selectedLibraryBooks)}
+								>
+									Send selected
+								</button>
+							</div>
+						) : null}
 					</div>
 
 					{featuredLibraryBooks.length > 0 ? (
@@ -748,11 +929,21 @@ function App() {
 								<li
 									key={book.id}
 									className={`book-card library-book ${
+										selectedLibraryBookIds.has(book.id) ? "selected" : ""
+									} ${
 										transferState.lastKey === `send-${book.id}`
 											? "complete"
 											: ""
 									}`}
 								>
+									<label className="select-row">
+										<input
+											type="checkbox"
+											checked={selectedLibraryBookIds.has(book.id)}
+											onChange={() => toggleLibraryBook(book.id)}
+										/>
+										<span>Select</span>
+									</label>
 									<BookCardContent book={book} index={index} />
 									<div className="formats">
 										{book.formats.length
@@ -769,7 +960,7 @@ function App() {
 												!reader ||
 												book.formats.length === 0
 											}
-											onClick={() => void sendToReader(book)}
+											onClick={() => sendToReader([book])}
 										>
 											{transferState.busyKey === `send-${book.id}`
 												? "Sending..."
@@ -797,13 +988,17 @@ function App() {
 function DeviceBookCard({
 	book,
 	index,
+	selected,
 	transferState,
+	onToggle,
 	onImport,
 	onDelete,
 }: {
 	book: Book;
 	index: number;
+	selected: boolean;
 	transferState: TransferState;
+	onToggle: () => void;
 	onImport: (book: Book, deleteAfterImport: boolean) => void;
 	onDelete: (book: Book) => void;
 }) {
@@ -817,7 +1012,15 @@ function DeviceBookCard({
 		transferState.lastKey === deleteKey;
 
 	return (
-		<li className={`book-card device-book ${completed ? "complete" : ""}`}>
+		<li
+			className={`book-card device-book ${selected ? "selected" : ""} ${
+				completed ? "complete" : ""
+			}`}
+		>
+			<label className="select-row">
+				<input type="checkbox" checked={selected} onChange={onToggle} />
+				<span>Select</span>
+			</label>
 			<BookCardContent book={book} index={index} />
 			<div className="card-actions">
 				<button

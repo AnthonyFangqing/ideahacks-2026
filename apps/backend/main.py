@@ -329,6 +329,59 @@ def api_library_status():
     return jsonify({"library": library_status()})
 
 
+def request_int_list(payload: dict[str, Any], plural_key: str, singular_key: str) -> list[int]:
+    raw_items = payload.get(plural_key)
+    if raw_items is None and singular_key in payload:
+        raw_items = [payload[singular_key]]
+    if not isinstance(raw_items, list) or not raw_items:
+        raise ValueError(f"{plural_key} is required")
+    return [int(item) for item in raw_items]
+
+
+def request_string_list(
+    payload: dict[str, Any],
+    plural_key: str,
+    singular_key: str,
+) -> list[str]:
+    raw_items = payload.get(plural_key)
+    if raw_items is None and singular_key in payload:
+        raw_items = [payload[singular_key]]
+    if not isinstance(raw_items, list) or not raw_items:
+        raise ValueError(f"{plural_key} is required")
+
+    items: list[str] = []
+    for item in raw_items:
+        if not isinstance(item, str) or not item:
+            raise ValueError(f"{plural_key} must contain non-empty strings")
+        items.append(item)
+    return items
+
+
+def request_device_imports(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_items = payload.get("books")
+    if raw_items is None and "device_path" in payload:
+        raw_items = [{
+            "device_path": payload.get("device_path"),
+            "metadata": payload.get("metadata"),
+        }]
+    if not isinstance(raw_items, list) or not raw_items:
+        raise ValueError("books is required")
+
+    imports: list[dict[str, Any]] = []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            raise ValueError("books must contain objects")
+        device_path = item.get("device_path")
+        if not isinstance(device_path, str) or not device_path:
+            raise ValueError("each book needs a device_path")
+        metadata = item.get("metadata")
+        imports.append({
+            "device_path": device_path,
+            "metadata": metadata if isinstance(metadata, dict) else {},
+        })
+    return imports
+
+
 @app.get("/api/device")
 def api_device():
     refresh = request.args.get("refresh") != "false"
@@ -375,36 +428,48 @@ def api_import_to_library():
 def api_send_to_device():
     payload = request.get_json(silent=True) or {}
     try:
-        book_id = int(payload["book_id"])
-    except (KeyError, TypeError, ValueError):
-        return api_error("book_id is required", 400)
+        book_ids = request_int_list(payload, "book_ids", "book_id")
+    except (TypeError, ValueError) as exc:
+        return api_error(str(exc), 400)
 
     requested_format = payload.get("format")
     if requested_format is not None and not isinstance(requested_format, str):
         return api_error("format must be a string", 400)
 
     def work(job: TransferJob) -> dict[str, Any]:
-        exported: dict[str, Any] | None = None
+        exported_books: list[dict[str, Any]] = []
+        transfers: list[dict[str, Any]] = []
         try:
             update_transfer_job(job, stage="Waiting for reader", progress=0.1)
             with device_operation_lock:
-                update_transfer_job(job, stage="Exporting from library", progress=0.25)
-                exported = export_library_book(book_id, requested_format)
-                update_transfer_job(job, stage="Sending to reader", progress=0.55)
-                transfer = send_book_to_device(
-                    exported["path"],
-                    exported["filename"],
-                    exported["book"],
-                )
+                total = len(book_ids)
+                for index, book_id in enumerate(book_ids, start=1):
+                    update_transfer_job(
+                        job,
+                        stage=f"Exporting {index}/{total} from library",
+                        progress=0.15 + ((index - 1) / total) * 0.3,
+                    )
+                    exported = export_library_book(book_id, requested_format)
+                    exported_books.append(exported)
+                    update_transfer_job(
+                        job,
+                        stage=f"Sending {index}/{total} to reader",
+                        progress=0.45 + ((index - 1) / total) * 0.35,
+                    )
+                    transfers.append(send_book_to_device(
+                        exported["path"],
+                        exported["filename"],
+                        exported["book"],
+                    ))
             update_transfer_job(job, stage="Refreshing reader", progress=0.85)
             reader = refresh_connected_e_reader()
         finally:
-            if exported is not None:
+            for exported in exported_books:
                 Path(exported["path"]).unlink(missing_ok=True)
 
         return {
             "ok": True,
-            "transfer": transfer,
+            "transfers": transfers,
             "connected_e_reader": asdict(reader) if reader is not None else None,
         }
 
@@ -416,21 +481,17 @@ def api_send_to_device():
 def api_import_from_device():
     app.logger.info("device.import request received")
     payload = request.get_json(silent=True) or {}
-    device_path = payload.get("device_path")
-    if not isinstance(device_path, str) or not device_path:
-        return api_error("device_path is required", 400)
+    try:
+        imports = request_device_imports(payload)
+    except ValueError as exc:
+        return api_error(str(exc), 400)
     delete_after_import = bool(payload.get("delete_after_import", False))
-
-    suffix = Path(device_path).suffix or ".book"
-    temp_file = tempfile.NamedTemporaryFile(
-        prefix="ideahacks_device_import_",
-        suffix=suffix,
-        delete=False,
-    )
-    temp_file.close()
 
     def work(job: TransferJob) -> dict[str, Any]:
         started_at = time.perf_counter()
+        temp_paths: list[Path] = []
+        added_ids: list[int] = []
+        deleted: list[dict[str, Any]] = []
         try:
             app.logger.info("device.import waiting for device_operation_lock")
             update_transfer_job(job, stage="Waiting for reader", progress=0.1)
@@ -439,26 +500,42 @@ def api_import_from_device():
                     "device.import acquired device_operation_lock after %.2fs",
                     time.perf_counter() - started_at,
                 )
-                update_transfer_job(job, stage="Copying from reader", progress=0.3)
-                imported = import_book_from_device(device_path, temp_file.name)
-                app.logger.info(
-                    "device.import copied file in %.2fs",
-                    time.perf_counter() - started_at,
-                )
-                update_transfer_job(job, stage="Adding to library", progress=0.6)
-                added_ids = import_file_to_library(
-                    temp_file.name,
-                    imported.get("metadata") or payload.get("metadata"),
-                    delete_after_import=True,
-                )
-                app.logger.info(
-                    "device.import added to library in %.2fs",
-                    time.perf_counter() - started_at,
-                )
-                deleted = None
-                if delete_after_import:
-                    update_transfer_job(job, stage="Deleting from reader", progress=0.75)
-                    deleted = delete_book_from_device(device_path)
+                total = len(imports)
+                for index, item in enumerate(imports, start=1):
+                    device_path = item["device_path"]
+                    suffix = Path(device_path).suffix or ".book"
+                    temp_file = tempfile.NamedTemporaryFile(
+                        prefix="ideahacks_device_import_",
+                        suffix=suffix,
+                        delete=False,
+                    )
+                    temp_file.close()
+                    temp_path = Path(temp_file.name)
+                    temp_paths.append(temp_path)
+
+                    update_transfer_job(
+                        job,
+                        stage=f"Copying {index}/{total} from reader",
+                        progress=0.15 + ((index - 1) / total) * 0.3,
+                    )
+                    imported = import_book_from_device(device_path, str(temp_path))
+                    update_transfer_job(
+                        job,
+                        stage=f"Adding {index}/{total} to library",
+                        progress=0.45 + ((index - 1) / total) * 0.25,
+                    )
+                    added_ids.extend(import_file_to_library(
+                        str(temp_path),
+                        imported.get("metadata") or item["metadata"],
+                        delete_after_import=True,
+                    ))
+                    if delete_after_import:
+                        update_transfer_job(
+                            job,
+                            stage=f"Deleting {index}/{total} from reader",
+                            progress=0.7 + ((index - 1) / total) * 0.15,
+                        )
+                        deleted.append(delete_book_from_device(device_path))
                 update_transfer_job(job, stage="Refreshing library", progress=0.85)
                 books = list_library_books()
             reader = (
@@ -467,7 +544,8 @@ def api_import_from_device():
                 else current_connected_e_reader()
             )
         except Exception:
-            Path(temp_file.name).unlink(missing_ok=True)
+            for temp_path in temp_paths:
+                temp_path.unlink(missing_ok=True)
             raise
 
         return {
@@ -486,15 +564,23 @@ def api_import_from_device():
 @app.post("/api/device/delete")
 def api_delete_from_device():
     payload = request.get_json(silent=True) or {}
-    device_path = payload.get("device_path")
-    if not isinstance(device_path, str) or not device_path:
-        return api_error("device_path is required", 400)
+    try:
+        device_paths = request_string_list(payload, "device_paths", "device_path")
+    except ValueError as exc:
+        return api_error(str(exc), 400)
 
     def work(job: TransferJob) -> dict[str, Any]:
+        deleted: list[dict[str, Any]] = []
         update_transfer_job(job, stage="Waiting for reader", progress=0.1)
         with device_operation_lock:
-            update_transfer_job(job, stage="Deleting from reader", progress=0.45)
-            deleted = delete_book_from_device(device_path)
+            total = len(device_paths)
+            for index, device_path in enumerate(device_paths, start=1):
+                update_transfer_job(
+                    job,
+                    stage=f"Deleting {index}/{total} from reader",
+                    progress=0.2 + ((index - 1) / total) * 0.6,
+                )
+                deleted.append(delete_book_from_device(device_path))
         update_transfer_job(job, stage="Refreshing reader", progress=0.85)
         reader = refresh_connected_e_reader()
         return {
