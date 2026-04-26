@@ -101,6 +101,18 @@ type DragPayload =
 			bookKey: string;
 	  };
 
+type TouchDragState = {
+	payload: DragPayload;
+	title: string;
+	coverUrl: string | null;
+	startX: number;
+	startY: number;
+	x: number;
+	y: number;
+	dragging: boolean;
+	cancelled: boolean;
+};
+
 type RailBook =
 	| {
 			source: "kiosk";
@@ -177,12 +189,26 @@ const postJson = async <T,>(url: string, payload: Record<string, unknown>) => {
 	return decoded;
 };
 
+const getKioskPoint = (element: Element, clientX: number, clientY: number) => {
+	const kiosk = element.closest(".pibrary-kiosk");
+	const bounds = kiosk?.getBoundingClientRect();
+	if (!bounds) {
+		return { x: clientX, y: clientY };
+	}
+
+	return {
+		x: ((clientX - bounds.left) / bounds.width) * 1333,
+		y: ((clientY - bounds.top) / bounds.height) * 800,
+	};
+};
+
 function App() {
 	const [reader, setReader] = useState<ConnectedEReader | null>(null);
 	const [deviceLoading, setDeviceLoading] = useState(false);
 	const [libraryBooks, setLibraryBooks] = useState<LibraryBook[]>([]);
 	const [currentTime, setCurrentTime] = useState(() => new Date());
 	const [dragTarget, setDragTarget] = useState<"kiosk" | "reader" | null>(null);
+	const [touchDrag, setTouchDrag] = useState<TouchDragState | null>(null);
 	const [transferState, setTransferState] = useState<TransferState>({
 		busyKey: null,
 		jobId: null,
@@ -526,13 +552,131 @@ function App() {
 		}
 	};
 
+	const getTouchDropTarget = (x: number, y: number) => {
+		const target = document
+			.elementFromPoint(x, y)
+			?.closest<HTMLElement>("[data-drop-target]");
+		const destination = target?.dataset.dropTarget;
+		if (destination === "kiosk" || destination === "reader") {
+			return destination;
+		}
+		return null;
+	};
+
+	const acceptsDropTarget = (
+		destination: "kiosk" | "reader" | null,
+		payload: DragPayload,
+	) =>
+		Boolean(
+			destination &&
+				((destination === "kiosk" && payload.source === "reader") ||
+					(destination === "reader" && payload.source === "kiosk")),
+		);
+
+	const startTouchDrag = (
+		payload: DragPayload,
+		preview: { title: string; coverUrl: string | null },
+		event: React.PointerEvent,
+	) => {
+		if (event.pointerType === "mouse" || transferState.busyKey) {
+			return;
+		}
+
+		const point = getKioskPoint(
+			event.currentTarget,
+			event.clientX,
+			event.clientY,
+		);
+		setTouchDrag({
+			payload,
+			title: preview.title,
+			coverUrl: preview.coverUrl,
+			startX: point.x,
+			startY: point.y,
+			x: point.x,
+			y: point.y,
+			dragging: false,
+			cancelled: false,
+		});
+	};
+
+	const moveTouchDrag = (event: React.PointerEvent) => {
+		if (!touchDrag || touchDrag.cancelled || event.pointerType === "mouse") {
+			return;
+		}
+
+		const point = getKioskPoint(
+			event.currentTarget,
+			event.clientX,
+			event.clientY,
+		);
+		const deltaX = point.x - touchDrag.startX;
+		const deltaY = point.y - touchDrag.startY;
+		const distance = Math.hypot(deltaX, deltaY);
+
+		if (!touchDrag.dragging) {
+			if (Math.abs(deltaX) > 12 && Math.abs(deltaX) > Math.abs(deltaY)) {
+				setTouchDrag((current) =>
+					current ? { ...current, cancelled: true } : current,
+				);
+				return;
+			}
+			if (distance < 10) {
+				return;
+			}
+			navigator.vibrate?.(18);
+		}
+
+		event.preventDefault();
+		const destination = getTouchDropTarget(event.clientX, event.clientY);
+		const nextTarget = acceptsDropTarget(destination, touchDrag.payload)
+			? destination
+			: null;
+		setDragTarget(nextTarget);
+		setTouchDrag((current) =>
+			current && !current.cancelled
+				? {
+						...current,
+						x: point.x,
+						y: point.y,
+						dragging: true,
+					}
+				: current,
+		);
+	};
+
+	const endTouchDrag = (event: React.PointerEvent) => {
+		if (!touchDrag || event.pointerType === "mouse") {
+			return;
+		}
+
+		const destination = getTouchDropTarget(event.clientX, event.clientY);
+		const shouldDrop =
+			touchDrag.dragging &&
+			!touchDrag.cancelled &&
+			acceptsDropTarget(destination, touchDrag.payload);
+
+		if (shouldDrop && destination) {
+			navigator.vibrate?.([22, 18, 22]);
+			handleDrop(destination, touchDrag.payload);
+		} else {
+			setDragTarget(null);
+		}
+		setTouchDrag(null);
+	};
+
 	const timeLabel = currentTime.toLocaleTimeString([], {
 		hour: "numeric",
 		minute: "2-digit",
 	});
 
 	return (
-		<main className={`pibrary-kiosk ${mode}`}>
+		<main
+			className={`pibrary-kiosk ${mode}`}
+			onPointerMove={moveTouchDrag}
+			onPointerUp={endTouchDrag}
+			onPointerCancel={endTouchDrag}
+		>
 			<div className="wood-wash" />
 			<section className="idle-clock" aria-label="Current time">
 				<p>
@@ -556,6 +700,7 @@ function App() {
 						emptyLabel="No reader books"
 						onDragTarget={setDragTarget}
 						onDropBook={handleDrop}
+						onTouchDragStart={startTouchDrag}
 						transferState={transferState}
 					/>
 				)}
@@ -570,6 +715,7 @@ function App() {
 					emptyLabel="No kiosk books"
 					onDragTarget={setDragTarget}
 					onDropBook={handleDrop}
+					onTouchDragStart={startTouchDrag}
 					transferState={transferState}
 				/>
 			</section>
@@ -588,6 +734,22 @@ function App() {
 					{transferState.error}
 				</div>
 			) : null}
+
+			{touchDrag?.dragging && !touchDrag.cancelled ? (
+				<div
+					className="touch-drag-preview"
+					style={{
+						left: `${touchDrag.x}px`,
+						top: `${touchDrag.y}px`,
+					}}
+				>
+					{touchDrag.coverUrl ? (
+						<img src={touchDrag.coverUrl} alt="" />
+					) : (
+						<span>{touchDrag.title}</span>
+					)}
+				</div>
+			) : null}
 		</main>
 	);
 }
@@ -600,6 +762,7 @@ function BookRail({
 	emptyLabel,
 	onDragTarget,
 	onDropBook,
+	onTouchDragStart,
 	transferState,
 }: {
 	apiBaseUrl: string;
@@ -609,6 +772,11 @@ function BookRail({
 	emptyLabel: string;
 	onDragTarget: (target: "kiosk" | "reader" | null) => void;
 	onDropBook: (destination: "kiosk" | "reader", payload: DragPayload) => void;
+	onTouchDragStart: (
+		payload: DragPayload,
+		preview: { title: string; coverUrl: string | null },
+		event: React.PointerEvent,
+	) => void;
 	transferState: TransferState;
 }) {
 	const [query, setQuery] = useState("");
@@ -657,6 +825,7 @@ function BookRail({
 		<section
 			className={`book-rail-drop ${canReceive ? "can-receive" : ""}`}
 			aria-label={`${destination} drop target`}
+			data-drop-target={destination}
 			onDragEnter={(event) => {
 				if (acceptsPayload(parseDragPayload(event))) {
 					onDragTarget(destination);
@@ -705,6 +874,7 @@ function BookRail({
 						apiBaseUrl={apiBaseUrl}
 						item={item}
 						key={`${item.source}-${item.key}`}
+						onTouchDragStart={onTouchDragStart}
 						transferState={transferState}
 					/>
 				))}
@@ -774,10 +944,16 @@ function SearchCard({
 function BookCoverCard({
 	apiBaseUrl,
 	item,
+	onTouchDragStart,
 	transferState,
 }: {
 	apiBaseUrl: string;
 	item: RailBook;
+	onTouchDragStart: (
+		payload: DragPayload,
+		preview: { title: string; coverUrl: string | null },
+		event: React.PointerEvent,
+	) => void;
 	transferState: TransferState;
 }) {
 	const coverUrl = getCoverUrl(item.book, apiBaseUrl);
@@ -802,6 +978,12 @@ function BookCoverCard({
 					"application/x-pibrary-book",
 					JSON.stringify(payload),
 				);
+			}}
+			onPointerDown={(event) => {
+				onTouchDragStart(payload, { title, coverUrl }, event);
+			}}
+			onContextMenu={(event) => {
+				event.preventDefault();
 			}}
 			title={`${title} by ${authors}`}
 		>
