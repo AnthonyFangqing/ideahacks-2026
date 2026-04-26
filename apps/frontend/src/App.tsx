@@ -620,12 +620,10 @@ function App() {
 	};
 
 	const books = reader?.books ?? [];
-	const featuredDeviceBooks = books.slice(0, 12);
-	const featuredLibraryBooks = libraryBooks.slice(0, 12);
-	const selectedDeviceBooks = featuredDeviceBooks.filter((book, index) =>
+	const selectedDeviceBooks = books.filter((book, index) =>
 		selectedDeviceBookKeys.has(getBookKey(book, index)),
 	);
-	const selectedLibraryBooks = featuredLibraryBooks.filter((book) =>
+	const selectedLibraryBooks = libraryBooks.filter((book) =>
 		selectedLibraryBookIds.has(book.id),
 	);
 	const toggleDeviceBook = (book: Book, index: number) => {
@@ -837,7 +835,7 @@ function App() {
 								? `${books.length} book${books.length === 1 ? "" : "s"} reported by Calibre.`
 								: "Dock an e-reader to scan it and enable transfer actions."}
 						</p>
-						{featuredDeviceBooks.length > 0 ? (
+						{books.length > 0 ? (
 							<div className="selection-bar">
 								<strong>{selectedDeviceBooks.length} selected</strong>
 								<button
@@ -851,9 +849,9 @@ function App() {
 						) : null}
 					</div>
 
-					{featuredDeviceBooks.length > 0 ? (
+					{books.length > 0 ? (
 						<ul className="book-grid compact">
-							{featuredDeviceBooks.map((book, index) => (
+							{books.map((book, index) => (
 								<DeviceBookCard
 									key={getBookKey(book, index)}
 									book={book}
@@ -883,7 +881,7 @@ function App() {
 								? "Books come from the configured Calibre library."
 								: "No Calibre metadata.db exists yet. Import a reader book or add books with Calibre to initialize it."}
 						</p>
-						{featuredLibraryBooks.length > 0 ? (
+						{libraryBooks.length > 0 ? (
 							<div className="selection-bar">
 								<strong>{selectedLibraryBooks.length} selected</strong>
 								<button
@@ -905,9 +903,9 @@ function App() {
 						) : null}
 					</div>
 
-					{featuredLibraryBooks.length > 0 ? (
+					{libraryBooks.length > 0 ? (
 						<ul className="book-grid compact">
-							{featuredLibraryBooks.map((book, index) => (
+							{libraryBooks.map((book, index) => (
 								<li
 									key={book.id}
 									className={`book-card library-book ${
