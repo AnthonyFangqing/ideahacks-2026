@@ -169,7 +169,7 @@ log_step "Installing minimal runtime dependencies..."
 
 apt-get install -y --no-install-recommends \
     git curl ca-certificates gnupg \
-    libusb-1.0-0 \
+    libusb-1.0-0 xdg-utils \
     systemd || {
         log_error "apt install failed. Trying with --fix-missing..."
         apt-get install -f -y
@@ -180,29 +180,47 @@ apt-get clean
 log_success "Runtime dependencies installed"
 
 # ----------------------------------------------------------------------------
-# 3. Calibre (official installer — skips if already present)
+# 3. Calibre (official prebuilt installer — MUST work for e-reader support)
 # ----------------------------------------------------------------------------
 log_step "Checking Calibre..."
 
 if command -v calibre-debug &>/dev/null; then
     log_skip "Calibre"
 else
-    log_info "Calibre not found. Installing via official installer..."
+    log_info "Installing Calibre via official prebuilt installer..."
+    # The installer needs xdg-utils to create desktop entries, and xz to unpack.
+    if ! dpkg -l xdg-utils 2>/dev/null | grep -q "^ii"; then
+        apt-get install -y --no-install-recommends xdg-utils
+        apt-get clean
+    fi
     wget -nv -O- https://download.calibre-ebook.com/linux-installer.sh | sh /dev/stdin install_dir=/opt/calibre isolated=y
-    ln -sf /opt/calibre/calibre-debug /usr/local/bin/calibre-debug || true
-    ln -sf /opt/calibre/calibredb     /usr/local/bin/calibredb     || true
-    ln -sf /opt/calibre/ebook-convert /usr/local/bin/ebook-convert || true
+
+    # The installer may place binaries directly in /opt/calibre/ or in
+    # /opt/calibre/calibre/. Detect the actual location and symlink correctly.
+    CALIBRE_BIN_DIR=""
+    for candidate in /opt/calibre /opt/calibre/calibre; do
+        if [[ -x "${candidate}/calibre-debug" ]]; then
+            CALIBRE_BIN_DIR="$candidate"
+            break
+        fi
+    done
+
+    if [[ -z "$CALIBRE_BIN_DIR" ]]; then
+        log_fatal "Calibre installer ran but calibre-debug binary was not found in /opt/calibre or /opt/calibre/calibre.\n   Check /tmp/calibre-installer*.log for errors.\n   The prebuilt installer requires xdg-utils and xz."
+        exit 1
+    fi
+
+    ln -sf "${CALIBRE_BIN_DIR}/calibre-debug" /usr/local/bin/calibre-debug
+    ln -sf "${CALIBRE_BIN_DIR}/calibredb"     /usr/local/bin/calibredb
+    ln -sf "${CALIBRE_BIN_DIR}/ebook-convert" /usr/local/bin/ebook-convert
+
+    # Clean up installer download cache (~180 MB)
+    rm -rf /tmp/calibre-installer-cache
 fi
 
-# Fallback to distro package only if the official installer didn't land
-if ! command -v calibre-debug &>/dev/null; then
-    log_warn "Official installer failed. Falling back to distribution Calibre..."
-    apt-get install -y --no-install-recommends calibre || true
-    apt-get clean
-fi
-
-if ! command -v calibre-debug &>/dev/null; then
-    log_fatal "Calibre installation failed. The backend cannot work without calibre-debug.\n   Try manually: sudo apt update && sudo apt install -y calibre"
+# Verify it actually works — fail hard if not
+if ! calibre-debug --version >/dev/null 2>&1; then
+    log_fatal "Calibre binary exists but does not run.\n   This usually means a missing runtime library.\n   Try:  ldd $(which calibre-debug) | grep 'not found'\n   The prebuilt installer MUST succeed for e-reader detection to work."
     exit 1
 fi
 
